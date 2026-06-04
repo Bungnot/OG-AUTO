@@ -181,6 +181,11 @@ app = Flask(__name__)
 
 # ส่ง Flex / Push แบบไม่บล็อก webhook นานเกินไป
 EXECUTOR = ThreadPoolExecutor(max_workers=PUSH_WORKERS)
+IO_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+
+# ตัวแปรสำหรับ Throttling การเขียน Backup ป้องกัน I/O ถล่มดิสก์
+LAST_BACKUP_TIME = 0
+BACKUP_COOLDOWN_SECONDS = 1.0
 
 # กัน webhook หลายรายการประมวลผล STATE พร้อมกันจนผล/ยืนยันผลสลับลำดับ
 STATE_LOCK = threading.RLock()
@@ -1221,35 +1226,51 @@ def _build_single_round_backup(round_id: str, base_no: str = None, state: dict =
     }
 
 
-def save_round_backup_db(reason: str = "auto"):
+def save_round_backup_db(reason: str = "auto", force: bool = False):
     """
-    บันทึก backup อัตโนมัติแบบแยกไฟล์ต่อรอบ
-    ไม่สร้าง round_backup.json รวมทุกอย่างอีกแล้ว
+    บันทึก backup อัตโนมัติแบบแยกไฟล์ต่อรอบ (แบบ Async และมี Throttling)
     """
     if not ROUND_BACKUP_ENABLED:
         return False
 
-    try:
-        with STATE_LOCK:
-            targets = _round_ids_for_backup()
+    global LAST_BACKUP_TIME
+    now = time.time()
+    
+    # Throttling ป้องกันการบันทึกไฟล์รัวเกินไป ยกเว้นเมื่อถูกบังคับ (force=True) เช่น ตอนแจ้งผล หรือปิดรอบ
+    if not force and (now - LAST_BACKUP_TIME < BACKUP_COOLDOWN_SECONDS):
+        return False
+
+    LAST_BACKUP_TIME = now
+
+    def _async_backup_job():
+        try:
+            with STATE_LOCK:
+                targets = _round_ids_for_backup()
+                backup_data_list = []
+                for rid, info in targets.items():
+                    data = _build_single_round_backup(
+                        rid,
+                        base_no=info.get("base_no"),
+                        state=info.get("state"),
+                        reason=reason,
+                    )
+                    if data:
+                        path = _round_backup_path(rid, data.get("base_no"))
+                        backup_data_list.append((path, data))
+            
+            # ทำ Disk I/O นอก STATE_LOCK เพื่อไม่ให้ block thread อื่นๆ
             saved = 0
-            for rid, info in targets.items():
-                data = _build_single_round_backup(
-                    rid,
-                    base_no=info.get("base_no"),
-                    state=info.get("state"),
-                    reason=reason,
-                )
-                if not data:
-                    continue
-                path = _round_backup_path(rid, data.get("base_no"))
+            for path, data in backup_data_list:
                 _atomic_json_dump(path, data)
                 saved += 1
+            return saved > 0
+        except Exception as e:
+            print(f"ASYNC ROUND BACKUP DB ERROR: {e}")
+            return False
 
-        return saved > 0
-    except Exception as e:
-        print(f"SAVE ROUND BACKUP DB ERROR: {e}")
-        return False
+    # ส่งงานไปรันแบบ Async ใน IO_EXECUTOR ที่มีเพียง 1 worker เพื่อลด Disk I/O contention
+    IO_EXECUTOR.submit(_async_backup_job)
+    return True
 
 
 def _load_round_backup_file(path: str):
@@ -1569,31 +1590,45 @@ def load_user_db():
 USERS, NEXT_MEMBER_NO = load_user_db()
 
 
-def save_user_db():
+# ตัวแปรสำหรับ Throttling การเขียน User DB
+LAST_USER_DB_SAVE_TIME = 0
+USER_DB_SAVE_COOLDOWN_SECONDS = 2.0
+
+def save_user_db(force: bool = False):
     """
-    เขียนไฟล์แบบ atomic ลดโอกาสไฟล์พังถ้าโปรแกรมหยุดกลางทาง
+    เขียนไฟล์แบบ atomic (แบบ Async และ Throttled) เพื่อไม่ให้ block thread หลัก
     """
-    data = {
-        "next_member_no": NEXT_MEMBER_NO,
-        "users": USERS,
-        "updated_at": datetime.now().isoformat(),
-    }
+    global LAST_USER_DB_SAVE_TIME
+    now = time.time()
+    
+    if not force and (now - LAST_USER_DB_SAVE_TIME < USER_DB_SAVE_COOLDOWN_SECONDS):
+        return
 
-    directory = os.path.dirname(os.path.abspath(USER_DB_FILE)) or "."
-    fd, tmp_path = tempfile.mkstemp(prefix="users_", suffix=".json", dir=directory)
+    LAST_USER_DB_SAVE_TIME = now
 
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    # คัดลอกข้อมูลภายใต้ lock เพื่อป้องกัน race condition ระหว่างเขียนไฟล์
+    with STATE_LOCK:
+        data = {
+            "next_member_no": NEXT_MEMBER_NO,
+            "users": dict(USERS),  # shallow copy
+            "updated_at": datetime.now().isoformat(),
+        }
 
-        os.replace(tmp_path, USER_DB_FILE)
-
-    except Exception as e:
-        print(f"SAVE USER DB ERROR: {e}")
+    def _async_save_user_db():
+        directory = os.path.dirname(os.path.abspath(USER_DB_FILE)) or "."
+        fd, tmp_path = tempfile.mkstemp(prefix="users_", suffix=".json", dir=directory)
         try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, USER_DB_FILE)
+        except Exception as e:
+            print(f"ASYNC SAVE USER DB ERROR: {e}")
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    IO_EXECUTOR.submit(_async_save_user_db)
 
 
 def load_profit_db():
@@ -1778,26 +1813,30 @@ SLIP_TOPUPS = load_slip_topup_db()
 
 
 def save_slip_topup_db():
-    data = {
-        "slips": SLIP_TOPUPS.get("slips", {}),
-        "updated_at": datetime.now().isoformat(),
-    }
+    """
+    เขียนไฟล์ประวัติการเติมสลิปแบบ atomic (แบบ Async) เพื่อไม่ให้ block การประมวลผล
+    """
+    with STATE_LOCK:
+        data = {
+            "slips": dict(SLIP_TOPUPS.get("slips", {})),  # shallow copy
+            "updated_at": datetime.now().isoformat(),
+        }
 
-    directory = os.path.dirname(os.path.abspath(SLIP_TOPUP_DB_FILE)) or "."
-    fd, tmp_path = tempfile.mkstemp(prefix="slip_topups_", suffix=".json", dir=directory)
-
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-        os.replace(tmp_path, SLIP_TOPUP_DB_FILE)
-
-    except Exception as e:
-        print(f"SAVE SLIP TOPUP DB ERROR: {e}")
+    def _async_save_slip_topup_db():
+        directory = os.path.dirname(os.path.abspath(SLIP_TOPUP_DB_FILE)) or "."
+        fd, tmp_path = tempfile.mkstemp(prefix="slip_topups_", suffix=".json", dir=directory)
         try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, SLIP_TOPUP_DB_FILE)
+        except Exception as e:
+            print(f"ASYNC SAVE SLIP TOPUP DB ERROR: {e}")
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    IO_EXECUTOR.submit(_async_save_slip_topup_db)
 
 
 # ======================================================
@@ -5809,11 +5848,11 @@ def _post_line_api(url: str, payload: dict, timeout_seconds: float, label: str) 
     แก้เคส api.line.me connect timeout แล้ว webhook ค้างหรือ reply หลุด
     หมายเหตุ: ถ้าเน็ต/ไฟร์วอลล์ของเครื่องออก api.line.me ไม่ได้จริง ๆ โค้ดจะไม่ค้าง แต่ LINE จะยังส่งไม่สำเร็จ
     """
-    # สำรองสถานะล่าสุดก่อนส่งข้อความออก LINE
+    # สำรองสถานะล่าสุดก่อนส่งข้อความออก LINE (แบบ Async และมี Throttling)
     # ช่วยกันข้อมูลรอบ/คู่ติดหาย แม้ LINE API timeout หรือบอทถูกรีสตาร์ทหลังประมวลผลแล้ว
     # ยกเว้นช่วงสั้น ๆ หลังคำสั่งล้าง round_backups ไม่งั้น reply ของคำสั่งล้างจะสร้างไฟล์ backup กลับมาทันที
     if not ROUND_BACKUP_SUPPRESS_UNTIL or time.time() >= ROUND_BACKUP_SUPPRESS_UNTIL:
-        save_round_backup_db(reason=f"before_line_send:{label}")
+        save_round_backup_db(reason=f"before_line_send:{label}", force=False)
 
     if not LINE_CHANNEL_ACCESS_TOKEN:
         print(f"{label} ERROR: missing LINE_CHANNEL_ACCESS_TOKEN")
