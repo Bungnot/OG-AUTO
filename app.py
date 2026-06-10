@@ -125,7 +125,8 @@ SLIP2GO_RECEIVER_ACCOUNTS_JSON = ""
 SLIP2GO_DEBUG_MODE = False
 SLIP2GO_NOTIFY_NOT_FOUND = False
 # 1 บาท = 1 เครดิต เป็นค่าเริ่มต้น ถ้าต้องการ 1 บาท = 100 เครดิต ให้ตั้ง AUTO_TOPUP_RATE=100
-AUTO_TOPUP_RATE = Decimal(os.getenv("AUTO_TOPUP_RATE", "1"))
+# ปิดฟีเจอร์เติมออโต้: ตั้ง AUTO_TOPUP_RATE = 0 เพื่อไม่ให้เติมเครดิตอัตโนมัติ
+AUTO_TOPUP_RATE = Decimal(os.getenv("AUTO_TOPUP_RATE", "0"))
 MIN_TOPUP_AMOUNT = Decimal(os.getenv("MIN_TOPUP_AMOUNT", "1"))
 
 COMMISSION_PERCENT = int(os.getenv("COMMISSION_PERCENT", "10"))
