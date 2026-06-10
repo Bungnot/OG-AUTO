@@ -5747,7 +5747,11 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
         )
 
     credit_to_add = int((amount * AUTO_TOPUP_RATE).to_integral_value(rounding="ROUND_FLOOR"))
-    if credit_to_add <= 0:
+    
+    # ถ้า AUTO_TOPUP_RATE = 0 ให้เช็คสลิปเฉยๆ ไม่เติมเครดิต
+    check_only_mode = AUTO_TOPUP_RATE == 0
+    
+    if credit_to_add <= 0 and not check_only_mode:
         return slip_fail_flex(
             title="❌ คำนวณเครดิตไม่ได้",
             reason="ยอดเครดิตที่คำนวณได้ไม่ถูกต้อง",
@@ -5759,6 +5763,16 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
 
     with STATE_LOCK:
         slips = SLIP_TOPUPS.setdefault("slips", {})
+        
+        # ถ้าเป็น check_only_mode ให้เช็คสลิปเฉยๆ ไม่บันทึกประวัติการเติม
+        if check_only_mode:
+            target = get_registered_topup_user(user_id)
+            if not target:
+                return no_member_id_topup_flex()
+            # แสดงผลการตรวจสลิปเฉยๆ ไม่เติมเครดิต
+            return slip_success_flex(target, amount, 0, int(target.get("credit", 0) or 0), slip_ref, slip_data=data)
+        
+        # โหมดเติมเครดิตปกติ (AUTO_TOPUP_RATE > 0)
         if slip_ref in slips:
             old = slips.get(slip_ref, {})
             return slip_warning_flex(
