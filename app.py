@@ -5764,15 +5764,7 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
     with STATE_LOCK:
         slips = SLIP_TOPUPS.setdefault("slips", {})
         
-        # ถ้าเป็น check_only_mode ให้เช็คสลิปเฉยๆ ไม่บันทึกประวัติการเติม
-        if check_only_mode:
-            target = get_registered_topup_user(user_id)
-            if not target:
-                return no_member_id_topup_flex()
-            # แสดงผลการตรวจสลิปเฉยๆ ไม่เติมเครดิต
-            return slip_success_flex(target, amount, 0, int(target.get("credit", 0) or 0), slip_ref, slip_data=data)
-        
-        # โหมดเติมเครดิตปกติ (AUTO_TOPUP_RATE > 0)
+        # ตรวจสลิปซ้ำจากฐานข้อมูล (ทั้งโหมดเช็คเฉยๆ และโหมดเติมปกติ)
         if slip_ref in slips:
             old = slips.get(slip_ref, {})
             return slip_warning_flex(
@@ -5781,7 +5773,36 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
                 slip_ref=slip_ref,
                 created_at=old.get("created_at", "-"),
             )
-
+        
+        # ถ้าเป็น check_only_mode ให้เช็คสลิปเฉยๆ ไม่เติมเครดิต แต่บันทึกประวัติ
+        if check_only_mode:
+            target = get_registered_topup_user(user_id)
+            if not target:
+                return no_member_id_topup_flex()
+            
+            # บันทึกประวัติสลิปแม้ว่าจะไม่เติมเครดิต (เพื่อกันส่งซ้ำ)
+            slips[slip_ref] = {
+                "user_id": user_id,
+                "member_no": target.get("member_no"),
+                "line_name": target.get("line_name") or target.get("name"),
+                "amount_baht": str(amount),
+                "credit_added": 0,  # ไม่เติมเครดิต
+                "old_credit": int(target.get("credit", 0) or 0),
+                "new_credit": int(target.get("credit", 0) or 0),  # ไม่เปลี่ยน
+                "ref_path": ref_path,
+                "amount_path": amount_path,
+                "line_message_id": message_id,
+                "created_at": now_text(),
+                "easyslip_response": data,
+                "check_only": True,  # ทำเครื่องหมายว่าเป็นโหมดเช็คเฉยๆ
+            }
+            
+            save_slip_topup_db()
+            
+            # แสดงผลการตรวจสลิปเฉยๆ ไม่เติมเครดิต
+            return slip_success_flex(target, amount, 0, int(target.get("credit", 0) or 0), slip_ref, slip_data=data)
+        
+        # โหมดเติมเครดิตปกติ (AUTO_TOPUP_RATE > 0)
         target = get_registered_topup_user(user_id)
         if not target:
             return no_member_id_topup_flex()
