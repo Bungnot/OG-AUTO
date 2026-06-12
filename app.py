@@ -10330,6 +10330,58 @@ def is_listplay_command(text: str) -> bool:
     return clean in {"listplay", "listplays"}
 
 
+
+def get_line_message_quota():
+    """ดึงข้อมูลโควตาข้อความจาก LINE API"""
+    try:
+        headers = {
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        response = requests.get(
+            "https://api.line.me/v2/bot/message/quota",
+            headers=headers,
+            timeout=5
+        )
+        if response.status_code == 200:
+            data = response.json()
+            return {"success": True, "remaining_quota": data.get("value", 0)}
+        else:
+            return {"success": False, "error": f"HTTP {response.status_code}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def quota_report():
+    """สร้างรายงานโควตาข้อความ"""
+    quota_info = get_line_message_quota()
+    if not quota_info.get("success"):
+        return f"❌ ไม่สามารถดึงข้อมูลโควตาได้\nข้อผิดพลาด: {quota_info.get('error', 'Unknown')}"
+    
+    remaining = quota_info.get("remaining_quota", 0)
+    from datetime import datetime
+    message = f"""📊 โควตาข้อความ LINE Official Account
+
+⏰ เวลา: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
+
+📈 สถิติการใช้งาน:
+• เหลือ: {remaining:,} ข้อความ
+
+⚠️ หมายเหตุ:
+• Broadcast API ไม่นับในโควตา
+• Push API นับในโควตา
+• ข้อมูลอาจมีความล่าช้า 1-2 นาที
+"""
+    return message
+
+
+def is_quota_command(text: str) -> bool:
+    """ตรวจสอบว่าเป็นคำสั่งดูโควตาหรือไม่"""
+    if not text:
+        return False
+    upper = text.upper().strip()
+    return upper in {"QUOTA", "/QUOTA"}
+
 def _listplay_display_name(name: str) -> str:
     """ทำชื่อให้แสดงในบรรทัด listplay โดยไม่ให้ขึ้นบรรทัดใหม่/ยาวเกินไป"""
     text = re.sub(r"\s+", " ", str(name or "-")).strip()
@@ -12457,6 +12509,15 @@ def handle_message(event):
             return
 
         reply_text(event.reply_token, current_round_report())
+        return
+
+
+    if is_quota_command(text):
+        if not is_admin(user_id):
+            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะแอดมิน")
+            return
+        
+        reply_text(event.reply_token, quota_report())
         return
 
     if is_match_list_command(text):
