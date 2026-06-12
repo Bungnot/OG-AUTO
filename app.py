@@ -171,6 +171,7 @@ QUIET_IGNORE_WRONG_REPLY = os.getenv("QUIET_IGNORE_WRONG_REPLY", "1") == "1"
 QUIET_WARN_INVALID_REPLY_TO_PLAY = os.getenv("QUIET_WARN_INVALID_REPLY_TO_PLAY", "1") == "1"
 LINE_API_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 LINE_API_PUSH_URL = "https://api.line.me/v2/bot/message/push"
+LINE_API_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
 LINE_API_PROFILE_URL = "https://api.line.me/v2/bot/profile/{user_id}"
 LINE_API_GROUP_MEMBER_PROFILE_URL = "https://api.line.me/v2/bot/group/{group_id}/member/{user_id}"
 LINE_API_ROOM_MEMBER_PROFILE_URL = "https://api.line.me/v2/bot/room/{room_id}/member/{user_id}"
@@ -2439,10 +2440,10 @@ def money_text(value):
 # Bank account command
 # ======================================================
 
-BANK_ACCOUNT_NUMBER = "6787309325"
-BANK_ACCOUNT_DISPLAY_NUMBER = "6787309325"
-BANK_ACCOUNT_BANK = "กรุงไทย"
-BANK_ACCOUNT_NAME = "ธนาวุฒิ แสวงศรี"
+BANK_ACCOUNT_NUMBER = "9382633298"
+BANK_ACCOUNT_DISPLAY_NUMBER = "938-2633-298"
+BANK_ACCOUNT_BANK = "ไทยพาณิชย์"
+BANK_ACCOUNT_NAME = "ภานุพงษ์ เอี่ยมท่า"
 # ใช้บัญชีเดียวสำหรับเติมเครดิตอัตโนมัติเท่านั้น
 # โค้ดจะใช้บัญชีนี้ตรวจ checkReceiver กับ Slip2Go และจะไม่รับบัญชีอื่น แม้ .env ยังมีบัญชีเก่าอยู่
 SINGLE_AUTO_TOPUP_RECEIVER = {
@@ -2491,9 +2492,9 @@ def bank_account_text() -> str:
         "📌💎บั้งไฟอีสาน OG💯💵\n"
         "━━━━━━━━━━━━━━\n\n"
         "🏦 แจ้งเลขบัญชีฝากเงิน\n\n"
-        "🔢 เลขบัญชี : 6787309325\n"
-        "🏛 ธนาคาร : กรุงไทย\n"
-        "👤 ชื่อบัญชี : ธนาวุฒิ แสวงศรี\n\n"
+        "🔢 เลขบัญชี : 9382633298\n"
+        "🏛 ธนาคาร : ไทยพาณิชย์\n"
+        "👤 ชื่อบัญชี : ภานุพงษ์ เอี่ยมท่า\n\n"
         "━━━━━━━━━━━━━━\n"
         "⚠️ เพื่อป้องกันมิจฉาชีพ\n"
         "ชื่อผู้ฝาก-ถอน ต้องเป็นชื่อเดียวกันเท่านั้น ✅"
@@ -4558,8 +4559,59 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
         receiver = raw.get("receiver", {})
         acct = receiver.get("account", {})
 
-        # ── 1. เทียบชื่อบัญชีก่อน (แม่นยำกว่าเลขบัญชี masked) ──────────────
-        if expected_name_th or expected_name_en:
+        # ── 1. เทียบเลขบัญชี ก่อน (ต้องตรงเท่านั้น ถ้าตั้งค่าไว้) ──────────────
+        # สำคัญ: ถ้าตั้งค่า EASYSLIP_ACCOUNT_NUMBER ต้องตรงเท่านั้น
+        # ไม่ยอมให้ผ่านแม้ชื่อบัญชีตรง
+        if expected_no_digits:
+            bank_obj = acct.get("bank") or {}
+            if isinstance(bank_obj, dict):
+                acct_no_digits = norm_no(bank_obj.get("account") or "")
+                if acct_no_digits:
+                    # exact match
+                    if acct_no_digits == expected_no_digits:
+                        # เลขบัญชีตรง → ผ่าน
+                        return True
+                    # suffix match (masked เช่น xxx-x-x3329-x)
+                    suffix = min(len(acct_no_digits), len(expected_no_digits), 6)
+                    if suffix >= 4 and acct_no_digits[-suffix:] == expected_no_digits[-suffix:]:
+                        # suffix ตรง → ผ่าน
+                        return True
+
+            # ── 1b. เทียบ PromptPay proxy (เบอร์โทร / เลขบัตร) ───────────────
+            proxy_obj = acct.get("proxy") or {}
+            if isinstance(proxy_obj, dict):
+                proxy_digits = norm_no(proxy_obj.get("account") or "")
+                if proxy_digits:
+                    if proxy_digits == expected_no_digits:
+                        # proxy ตรง → ผ่าน
+                        return True
+                    suffix = min(len(proxy_digits), len(expected_no_digits), 6)
+                    if suffix >= 4 and proxy_digits[-suffix:] == expected_no_digits[-suffix:]:
+                        # proxy suffix ตรง → ผ่าน
+                        return True
+
+            # ── 1c. matchedAccount จาก EasySlip ───────────────────────────────
+            matched = data.get("data", {}).get("matchedAccount") or {}
+            if isinstance(matched, dict):
+                matched_digits = norm_no(matched.get("bankNumber") or "")
+                if matched_digits and matched_digits == expected_no_digits:
+                    # matchedAccount ตรง → ผ่าน
+                    return True
+            
+            # ถ้าตั้งค่าเลขบัญชี แต่ไม่ตรงกับสลิป → ปฏิเสธเลย ไม่ตรวจชื่อ
+            # เพื่อป้องกันการโอนเข้าบัญชีคนอื่นแล้วส่งสลิปมา
+            if EASYSLIP_DEBUG_MODE:
+                try:
+                    acct_bank = (acct.get("bank") or {})
+                    acct_proxy = (acct.get("proxy") or {})
+                    print(f"EASYSLIP RECEIVER FAIL (account number mismatch): expected={expected_no_digits!r}, got_bank={norm_no(acct_bank.get('account',''))!r}, got_proxy={norm_no(acct_proxy.get('account',''))!r}")
+                except Exception:
+                    pass
+            return False
+
+        # ── 2. เทียบชื่อบัญชี (ถ้าไม่ตั้งค่าเลขบัญชี) ──────────────────────────
+        # ── 2. เทียบเลขบัญชี (bank account) ─────────────────────────────────
+        if expected_no_digits:
             name_th = norm_name(acct.get("name", {}).get("th") or "")
             name_en = norm_name(acct.get("name", {}).get("en") or "")
 
@@ -4592,37 +4644,7 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
                 if exp_en and name_en_clean and exp_en[:4] == name_en_clean[:4]:
                     return True
 
-        # ── 2. เทียบเลขบัญชี (bank account) ─────────────────────────────────
-        if expected_no_digits:
-            bank_obj = acct.get("bank") or {}
-            if isinstance(bank_obj, dict):
-                acct_no_digits = norm_no(bank_obj.get("account") or "")
-                if acct_no_digits:
-                    # exact match
-                    if acct_no_digits == expected_no_digits:
-                        return True
-                    # suffix match (masked เช่น xxx-x-x3329-x)
-                    suffix = min(len(acct_no_digits), len(expected_no_digits), 6)
-                    if suffix >= 4 and acct_no_digits[-suffix:] == expected_no_digits[-suffix:]:
-                        return True
 
-            # ── 3. เทียบ PromptPay proxy (เบอร์โทร / เลขบัตร) ───────────────
-            proxy_obj = acct.get("proxy") or {}
-            if isinstance(proxy_obj, dict):
-                proxy_digits = norm_no(proxy_obj.get("account") or "")
-                if proxy_digits:
-                    if proxy_digits == expected_no_digits:
-                        return True
-                    suffix = min(len(proxy_digits), len(expected_no_digits), 6)
-                    if suffix >= 4 and proxy_digits[-suffix:] == expected_no_digits[-suffix:]:
-                        return True
-
-            # ── 4. matchedAccount จาก EasySlip ───────────────────────────────
-            matched = data.get("data", {}).get("matchedAccount") or {}
-            if isinstance(matched, dict):
-                matched_digits = norm_no(matched.get("bankNumber") or "")
-                if matched_digits and matched_digits == expected_no_digits:
-                    return True
 
         if EASYSLIP_DEBUG_MODE:
             try:
@@ -6013,6 +6035,39 @@ def push_text_async(to, text):
 
 def push_flex_async(to, alt_text, flex_dict):
     EXECUTOR.submit(push_flex, to, alt_text, flex_dict)
+
+
+def broadcast_flex_to_users(user_ids, alt_text, flex_dict):
+    """
+    ส่ง FLEX ไปยังหลายคน โดยใช้ Broadcast API (ไม่เสียโควตา)
+    
+    ข้อดี:
+    - ไม่เสียโควตา (ไม่นับในลิมิต 35,000 ข้อความ/เดือน)
+    - ส่งได้ไม่จำกัด
+    
+    ข้อจำกัด:
+    - ต้องเป็น user_id เท่านั้น (ไม่ได้ group/room)
+    - ส่งทีละ request (ไม่ batch)
+    """
+    if not user_ids or not flex_dict:
+        return False
+    
+    # Broadcast API ต้องส่ง user_ids เป็น list
+    if isinstance(user_ids, str):
+        user_ids = [user_ids]
+    
+    payload = {
+        "to": user_ids,
+        "messages": [line_flex_payload(alt_text, flex_dict)],
+    }
+    return _post_line_api(LINE_API_BROADCAST_URL, payload, LINE_PUSH_TIMEOUT_SECONDS, f"BROADCAST FLEX to={len(user_ids)} users")
+
+
+def broadcast_flex_to_users_async(user_ids, alt_text, flex_dict):
+    """
+    ส่ง FLEX แบบ async โดยใช้ Broadcast API (ไม่เสียโควตา)
+    """
+    EXECUTOR.submit(broadcast_flex_to_users, user_ids, alt_text, flex_dict)
 
 
 # ======================================================
@@ -9281,9 +9336,13 @@ def create_match_from_pending(post, taker_entry):
     # สำรองทันทีหลังสร้างคู่ติดสำเร็จ กันบอทค้างก่อนส่ง Flex / ก่อนตอบกลับ LINE
     save_round_backup_db(reason="match_created")
 
-    # ส่ง Flex หาทั้งคู่แบบ async ทันที ไม่ sync profile ก่อน
-    push_flex_async(match["maker_id"], "จับคู่สำเร็จ", matched_flex_for_user(match, match["maker_id"]))
-    push_flex_async(match["taker_id"], "จับคู่สำเร็จ", matched_flex_for_user(match, match["taker_id"]))
+    # ส่ง Flex หาทั้งคู่แบบ async ทันที โดยใช้ Broadcast API (ไม่เสียโควตา)
+    # ส่ง FLEX ไปยัง maker และ taker พร้อมกัน โดยไม่เสีย 2 โควตา
+    broadcast_flex_to_users_async(
+        [match["maker_id"], match["taker_id"]], 
+        "จับคู่สำเร็จ", 
+        matched_flex_for_user(match, match["maker_id"])
+    )
 
     # เงียบในกลุ่มเมื่อแผลสมบูรณ์
     return None
