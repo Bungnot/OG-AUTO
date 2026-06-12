@@ -172,6 +172,7 @@ QUIET_WARN_INVALID_REPLY_TO_PLAY = os.getenv("QUIET_WARN_INVALID_REPLY_TO_PLAY",
 LINE_API_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 LINE_API_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 LINE_API_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
+LINE_API_MULTICAST_URL = "https://api.line.me/v2/bot/message/multicast"
 LINE_API_PROFILE_URL = "https://api.line.me/v2/bot/profile/{user_id}"
 LINE_API_GROUP_MEMBER_PROFILE_URL = "https://api.line.me/v2/bot/group/{group_id}/member/{user_id}"
 LINE_API_ROOM_MEMBER_PROFILE_URL = "https://api.line.me/v2/bot/room/{room_id}/member/{user_id}"
@@ -6070,6 +6071,44 @@ def broadcast_flex_to_users_async(user_ids, alt_text, flex_dict):
     EXECUTOR.submit(broadcast_flex_to_users, user_ids, alt_text, flex_dict)
 
 
+def multicast_flex_to_users(user_ids, alt_text, flex_dict):
+    """
+    ส่ง FLEX ไปยังหลายคน โดยใช้ Multicast API (ไม่เสียโควตา)
+    
+    ข้อดี:
+    - ไม่เสียโควตา (ไม่นับในลิมิต 35,000 ข้อความ/เดือน)
+    - ส่งเฉพาะ user_id ที่ระบุ (ต่างจาก Broadcast ที่ส่งให้ทุกคน)
+    - รองรับสูงสุด 500 คนต่อ request
+    
+    ข้อจำกัด:
+    - ต้องเป็น user_id เท่านั้น (ไม่ได้ group/room)
+    - ส่งทีละ request (ไม่ batch)
+    """
+    if not user_ids or not flex_dict:
+        return False
+    
+    # Multicast API ต้องส่ง user_ids เป็น list
+    if isinstance(user_ids, str):
+        user_ids = [user_ids]
+    
+    # ตัด user_ids ให้ไม่เกิน 500 คน
+    if len(user_ids) > 500:
+        user_ids = user_ids[:500]
+    
+    payload = {
+        "to": user_ids,
+        "messages": [line_flex_payload(alt_text, flex_dict)],
+    }
+    return _post_line_api(LINE_API_MULTICAST_URL, payload, LINE_PUSH_TIMEOUT_SECONDS, f"MULTICAST FLEX to={len(user_ids)} users")
+
+
+def multicast_flex_to_users_async(user_ids, alt_text, flex_dict):
+    """
+    ส่ง FLEX แบบ async โดยใช้ Multicast API (ไม่เสียโควตา)
+    """
+    EXECUTOR.submit(multicast_flex_to_users, user_ids, alt_text, flex_dict)
+
+
 # ======================================================
 # Parse commands
 # ======================================================
@@ -9336,12 +9375,19 @@ def create_match_from_pending(post, taker_entry):
     # สำรองทันทีหลังสร้างคู่ติดสำเร็จ กันบอทค้างก่อนส่ง Flex / ก่อนตอบกลับ LINE
     save_round_backup_db(reason="match_created")
 
-    # ส่ง Flex หาทั้งคู่แบบ async ทันที โดยใช้ Broadcast API (ไม่เสียโควตา)
-    # ส่ง FLEX ไปยัง maker และ taker พร้อมกัน โดยไม่เสีย 2 โควตา
-    broadcast_flex_to_users_async(
-        [match["maker_id"], match["taker_id"]], 
+    # ส่ง FLEX ไปยัง maker และ taker โดยใช้ Multicast API (ไม่เสียโควตา)
+    # Multicast ส่งเฉพาะ maker_id และ taker_id และเนืองจากที่ maker เห็น FLEX คนละของ maker
+    multicast_flex_to_users_async(
+        [match["maker_id"]], 
         "จับคู่สำเร็จ", 
         matched_flex_for_user(match, match["maker_id"])
+    )
+    
+    # Multicast ส่งเฉพาะ taker_id และเนืองจากที่ taker เห็น FLEX คนละของ taker
+    multicast_flex_to_users_async(
+        [match["taker_id"]], 
+        "จับคู่สำเร็จ", 
+        matched_flex_for_user(match, match["taker_id"])
     )
 
     # เงียบในกลุ่มเมื่อแผลสมบูรณ์
