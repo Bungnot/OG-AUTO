@@ -4602,10 +4602,22 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
                 if _easyslip_account_no_match(acct, expected_no_digits, norm_no, data):
                     return True  # match บัญชีใดบัญชีหนึ่ง → ผ่าน
 
-            # ไม่ match กับเลขบัญชีเลย ลองตรวจชื่อแทน
-            pass
+            # ไม่ match กับบัญชีใดเลย → ปฏิเสธ
+            if EASYSLIP_DEBUG_MODE:
+                try:
+                    acct_bank  = (acct.get("bank") or {})
+                    acct_proxy = (acct.get("proxy") or {})
+                    print(
+                        f"EASYSLIP RECEIVER FAIL (no account match): "
+                        f"expected_list={account_numbers!r}, "
+                        f"got_bank={norm_no(acct_bank.get('account', ''))!r}, "
+                        f"got_proxy={norm_no(acct_proxy.get('account', ''))!r}"
+                    )
+                except Exception:
+                    pass
+            return False
 
-        # ── 2. เทียบชื่อบัญชี (ใช้เฉพาะกรณีไม่ได้ตั้งค่าเลขบัญชีเลย หรือไม่ผ่านเลขบัญชี) ──────────
+        # ── 2. เทียบชื่อบัญชี (ใช้เฉพาะกรณีไม่ได้ตั้งค่าเลขบัญชีเลย) ──────────
         name_th = norm_name(acct.get("name", {}).get("th") or "")
         name_en = norm_name(acct.get("name", {}).get("en") or "")
 
