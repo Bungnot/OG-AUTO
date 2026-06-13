@@ -4542,7 +4542,7 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
     ถ้าไม่ได้ตั้งค่าทั้ง EASYSLIP_ACCOUNT_NUMBER และ EASYSLIP_ACCOUNT_NAME_TH/EN
     จะไม่ตรวจ → รับสลิปทุกบัญชี (ไม่แนะนำ)
     """
-    expected_no   = EASYSLIP_ACCOUNT_NUMBER.strip()
+    expected_no      = EASYSLIP_ACCOUNT_NUMBER.strip()
     expected_name_th = EASYSLIP_ACCOUNT_NAME_TH.strip()
     expected_name_en = EASYSLIP_ACCOUNT_NAME_EN.strip()
 
@@ -4550,19 +4550,17 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
     if not expected_no and not expected_name_th and not expected_name_en:
         return True
 
-    norm_no = lambda s: re.sub(r"[^0-9]", "", str(s or ""))
+    norm_no   = lambda s: re.sub(r"[^0-9]", "", str(s or ""))
     norm_name = lambda s: re.sub(r"\s+", "", str(s or "").lower())
 
     expected_no_digits = norm_no(expected_no)
 
     try:
-        raw = easyslip_get_raw_slip(data)
+        raw      = easyslip_get_raw_slip(data)
         receiver = raw.get("receiver", {})
-        acct = receiver.get("account", {})
+        acct     = receiver.get("account", {})
 
-        # ── 1. เทียบเลขบัญชี ก่อน (ต้องตรงเท่านั้น ถ้าตั้งค่าไว้) ──────────────
-        # สำคัญ: ถ้าตั้งค่า EASYSLIP_ACCOUNT_NUMBER ต้องตรงเท่านั้น
-        # ไม่ยอมให้ผ่านแม้ชื่อบัญชีตรง
+        # ── 1. เทียบเลขบัญชี (ต้องตรงเท่านั้น ถ้าตั้งค่าไว้) ─────────────────
         if expected_no_digits:
             bank_obj = acct.get("bank") or {}
             if isinstance(bank_obj, dict):
@@ -4570,12 +4568,11 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
                 if acct_no_digits:
                     # exact match
                     if acct_no_digits == expected_no_digits:
-                        # เลขบัญชีตรง → ผ่าน
                         return True
-                    # suffix match (masked เช่น xxx-x-x3329-x)
-                    suffix = min(len(acct_no_digits), len(expected_no_digits), 6)
+                    # suffix match (masked เช่น xxx-x-x0932-x)
+                    # ใช้ 4 หลักสุดท้าย เพื่อรองรับ mask แบบสั้น
+                    suffix = min(len(acct_no_digits), len(expected_no_digits), 4)  # แก้ไข: 6 → 4
                     if suffix >= 4 and acct_no_digits[-suffix:] == expected_no_digits[-suffix:]:
-                        # suffix ตรง → ผ่าน
                         return True
 
             # ── 1b. เทียบ PromptPay proxy (เบอร์โทร / เลขบัตร) ───────────────
@@ -4584,11 +4581,9 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
                 proxy_digits = norm_no(proxy_obj.get("account") or "")
                 if proxy_digits:
                     if proxy_digits == expected_no_digits:
-                        # proxy ตรง → ผ่าน
                         return True
-                    suffix = min(len(proxy_digits), len(expected_no_digits), 6)
+                    suffix = min(len(proxy_digits), len(expected_no_digits), 4)  # แก้ไข: 6 → 4
                     if suffix >= 4 and proxy_digits[-suffix:] == expected_no_digits[-suffix:]:
-                        # proxy suffix ตรง → ผ่าน
                         return True
 
             # ── 1c. matchedAccount จาก EasySlip ───────────────────────────────
@@ -4596,28 +4591,31 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
             if isinstance(matched, dict):
                 matched_digits = norm_no(matched.get("bankNumber") or "")
                 if matched_digits and matched_digits == expected_no_digits:
-                    # matchedAccount ตรง → ผ่าน
                     return True
-            
+
             # ถ้าตั้งค่าเลขบัญชี แต่ไม่ตรงกับสลิป → ปฏิเสธเลย ไม่ตรวจชื่อ
-            # เพื่อป้องกันการโอนเข้าบัญชีคนอื่นแล้วส่งสลิปมา
             if EASYSLIP_DEBUG_MODE:
                 try:
-                    acct_bank = (acct.get("bank") or {})
+                    acct_bank  = (acct.get("bank") or {})
                     acct_proxy = (acct.get("proxy") or {})
-                    print(f"EASYSLIP RECEIVER FAIL (account number mismatch): expected={expected_no_digits!r}, got_bank={norm_no(acct_bank.get('account',''))!r}, got_proxy={norm_no(acct_proxy.get('account',''))!r}")
+                    print(
+                        f"EASYSLIP RECEIVER FAIL (account number mismatch): "
+                        f"expected={expected_no_digits!r}, "
+                        f"got_bank={norm_no(acct_bank.get('account', ''))!r}, "
+                        f"got_proxy={norm_no(acct_proxy.get('account', ''))!r}"
+                    )
                 except Exception:
                     pass
             return False
 
-        # ── 2. เทียบชื่อบัญชี (ถ้าไม่ตั้งค่าเลขบัญชี) ──────────────────────────
-        # ── 2. เทียบเลขบัญชี (bank account) ─────────────────────────────────
-        if expected_no_digits:
+        # ── 2. เทียบชื่อบัญชี (ใช้เฉพาะกรณีไม่ได้ตั้งค่าเลขบัญชี) ─────────────
+        else:  # แก้ไข: เดิมเป็น "if expected_no_digits:" ซึ่งทำให้ block นี้ไม่ถูก execute เลย
             name_th = norm_name(acct.get("name", {}).get("th") or "")
             name_en = norm_name(acct.get("name", {}).get("en") or "")
 
-            # ตัดคำนำหน้าชื่อ ออกก่อนเทียบ
+            # ตัดคำนำหน้าชื่อออกก่อนเทียบ
             prefixes = ["นาย", "นาง", "น.ส.", "นางสาว", "mr.", "mrs.", "ms.", "miss"]
+
             def strip_prefix(s):
                 for p in prefixes:
                     if s.startswith(norm_name(p)):
@@ -4632,10 +4630,8 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
                 # เทียบ 2 ทิศทาง: expected ใน got หรือ got ใน expected
                 if exp_th and (exp_th in name_th_clean or name_th_clean in exp_th):
                     return True
-                # เทียบ partial: ตัวแรกของชื่อตรงกัน (กรณี EasySlip ตัดชื่อ)
-                if exp_th and name_th_clean and (
-                    exp_th[:4] == name_th_clean[:4]  # 4 ตัวแรกตรงกัน
-                ):
+                # เทียบ partial: 4 ตัวแรกตรงกัน (กรณี EasySlip ตัดชื่อ)
+                if exp_th and name_th_clean and exp_th[:4] == name_th_clean[:4]:
                     return True
 
             if expected_name_en:
@@ -4645,20 +4641,18 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
                 if exp_en and name_en_clean and exp_en[:4] == name_en_clean[:4]:
                     return True
 
-
-
         if EASYSLIP_DEBUG_MODE:
             try:
-                acct_bank = (acct.get("bank") or {})
+                acct_bank  = (acct.get("bank") or {})
                 acct_proxy = (acct.get("proxy") or {})
                 print(
                     f"EASYSLIP RECEIVER FAIL | "
                     f"expected_no={expected_no_digits!r} "
                     f"expected_name_th={expected_name_th!r} "
                     f"expected_name_en={expected_name_en!r} | "
-                    f"got_bank={norm_no(acct_bank.get('account',''))!r} "
-                    f"got_proxy={norm_no(acct_proxy.get('account',''))!r} "
-                    f"got_name_th={norm_name(acct.get('name',{}).get('th',''))!r}"
+                    f"got_bank={norm_no(acct_bank.get('account', ''))!r} "
+                    f"got_proxy={norm_no(acct_proxy.get('account', ''))!r} "
+                    f"got_name_th={norm_name(acct.get('name', {}).get('th', ''))!r}"
                 )
             except Exception:
                 pass
@@ -4666,11 +4660,10 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
     except Exception as e:
         if EASYSLIP_DEBUG_MODE:
             print(f"EASYSLIP RECEIVER CHECK EXCEPTION: {e}")
-        # exception = parse error ไม่ใช่บัญชีผิด → ให้ผ่านไม่ได้
-        # คืน False เพื่อความปลอดภัย
         return False
 
     return False
+
 
 
 def easyslip_is_verified(data: dict) -> bool:
