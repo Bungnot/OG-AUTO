@@ -91,15 +91,15 @@ EASYSLIP_ENABLED = os.getenv("EASYSLIP_ENABLED", "1") == "1"
 EASYSLIP_API_KEY = os.getenv("EASYSLIP_API_KEY", "").strip()
 EASYSLIP_API_URL = os.getenv("EASYSLIP_API_URL", "https://developer.easyslip.com/api/v1/verify").strip()
 # เลขบัญชีผู้รับที่ต้องตรงกับสลิป (ถ้าไม่ตั้งค่าไว้จะไม่เช็คบัญชีผู้รับ)
-EASYSLIP_ACCOUNT_NUMBER = os.getenv("EASYSLIP_ACCOUNT_NUMBER", "").strip()
+EASYSLIP_ACCOUNT_NUMBER = os.getenv("EASYSLIP_ACCOUNT_NUMBER", "6787309325").strip()
 # รองรับหลายบัญชี คั่นด้วย comma เช่น EASYSLIP_ACCOUNT_NUMBERS=6787309325,6787300932
 # ถ้าตั้ง EASYSLIP_ACCOUNT_NUMBERS จะใช้แทน EASYSLIP_ACCOUNT_NUMBER
 _raw_multi = os.getenv("EASYSLIP_ACCOUNT_NUMBERS", "").strip()
 EASYSLIP_ACCOUNT_NUMBERS = [x.strip() for x in _raw_multi.split(",") if x.strip()] if _raw_multi else (
     [EASYSLIP_ACCOUNT_NUMBER] if EASYSLIP_ACCOUNT_NUMBER else []
 )
-EASYSLIP_ACCOUNT_NAME_TH = os.getenv("EASYSLIP_ACCOUNT_NAME_TH", "").strip()
-EASYSLIP_ACCOUNT_NAME_EN = os.getenv("EASYSLIP_ACCOUNT_NAME_EN", "").strip()
+EASYSLIP_ACCOUNT_NAME_TH = os.getenv("EASYSLIP_ACCOUNT_NAME_TH", "ธนาวุฒิ แสวงศรี").strip()
+EASYSLIP_ACCOUNT_NAME_EN = os.getenv("EASYSLIP_ACCOUNT_NAME_EN", "Thanawut Saengsri").strip()
 EASYSLIP_CONNECT_TIMEOUT_SECONDS = float(os.getenv("EASYSLIP_CONNECT_TIMEOUT_SECONDS", "5"))
 EASYSLIP_TIMEOUT_SECONDS = float(os.getenv("EASYSLIP_TIMEOUT_SECONDS", "20"))
 EASYSLIP_API_RETRIES = int(os.getenv("EASYSLIP_API_RETRIES", "2"))
@@ -2496,15 +2496,14 @@ def is_bank_account_request(text: str) -> bool:
 
 def bank_account_text() -> str:
     return (
-        "📌💎บั้งไฟอีสาน OG💯💵\n"
+        "💎  บั้งไฟอีสาน OG  💯💵\n"
         "━━━━━━━━━━━━━━\n\n"
         "🏦 แจ้งเลขบัญชีฝากเงิน\n\n"
-        "🔢 เลขบัญชี : 6787309325\n"
-        "🏛 ธนาคาร : กรุงไทย\n"
-        "👤 ชื่อบัญชี : ธนาวุฒิ แสวงศรี\n\n"
+        "💎 เลขบัญชี : 6787309325\n"
+        "💎 ธนาคาร : กรุงไทย\n"
+        "💎 ชื่อบัญชี : ธนาวุฒิ แสวงศรี\n\n"
         "━━━━━━━━━━━━━━\n"
-        "⚠️ เพื่อป้องกันมิจฉาชีพ\n"
-        "ชื่อผู้ฝาก-ถอน ต้องเป็นชื่อเดียวกันเท่านั้น ✅"
+        "เพื่อป้องกันมิจฉาชีพ ชื่อผู้ฝาก-ถอนต้องเป็นชื่อเดียวกันเท่านั้น ‼️ 🚫"
     )
 
 def bank_account_backoffice_flex():
