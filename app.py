@@ -7,7 +7,7 @@ import tempfile
 import threading
 import hashlib
 from decimal import Decimal, InvalidOperation
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -109,6 +109,9 @@ EASYSLIP_TIMEOUT_SECONDS = float(os.getenv("EASYSLIP_TIMEOUT_SECONDS", "20"))
 EASYSLIP_API_RETRIES = int(os.getenv("EASYSLIP_API_RETRIES", "2"))
 EASYSLIP_API_RETRY_DELAY_SECONDS = float(os.getenv("EASYSLIP_API_RETRY_DELAY_SECONDS", "1.0"))
 EASYSLIP_DEBUG_MODE = os.getenv("EASYSLIP_DEBUG_MODE", "1") == "1"
+# สลิปใช้ได้เฉพาะ "วันต่อวัน" เท่านั้น (วันที่บนสลิปต้องตรงกับวันนี้ตามเวลาไทย)
+# ปิดได้โดยตั้ง SLIP_SAME_DAY_ONLY=0
+SLIP_SAME_DAY_ONLY = os.getenv("SLIP_SAME_DAY_ONLY", "1") == "1"
 # ตรวจภาพก่อนส่งเข้า EasySlip ด้วย QR gate
 # ปิดเป็นค่าเริ่มต้น เพราะรูปสลิปจาก LINE บางครั้งถูกบีบอัด/QR เล็ก ทำให้ OpenCV ตรวจไม่เจอและบอทเงียบ
 SLIP_IMAGE_QR_GATE_ENABLED = os.getenv("SLIP_IMAGE_QR_GATE_ENABLED", "0") == "1"
@@ -4593,6 +4596,58 @@ def _account_no_match_single(slip_raw, expected_no_digits: str) -> bool:
         return False
 
 
+# เขตเวลาไทย (+07:00) ใช้สำหรับเทียบ "วันต่อวัน" ของสลิปแบบไม่อิง TZ ของเครื่อง
+BANGKOK_TZ = timezone(timedelta(hours=7))
+
+
+def bangkok_now() -> datetime:
+    """เวลาปัจจุบันตามเขตเวลาไทย (อิง UTC จึงไม่เพี้ยนแม้เครื่องตั้ง TZ อื่น)"""
+    return datetime.now(timezone.utc).astimezone(BANGKOK_TZ)
+
+
+def easyslip_extract_datetime(data: dict):
+    """
+    อ่านวันเวลาที่โอนจาก EasySlip V2: data.rawSlip.date (ISO 8601)
+    คืน datetime ที่แปลงเป็นเขตเวลาไทยแล้ว หรือ None ถ้าอ่านไม่ได้
+    """
+    try:
+        raw = easyslip_get_raw_slip(data)
+        ds = raw.get("date")
+        if not ds:
+            return None
+        s = str(ds).strip()
+        if not s:
+            return None
+        # รองรับรูปแบบที่ลงท้ายด้วย Z (UTC)
+        s = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        # ถ้าไม่มีข้อมูลเขตเวลา ให้ถือว่าเป็นเวลาไทย
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=BANGKOK_TZ)
+        return dt.astimezone(BANGKOK_TZ)
+    except Exception:
+        return None
+
+
+def easyslip_slip_datetime_text(data: dict) -> str:
+    """ข้อความวันเวลาโอนสำหรับแสดงบน FLEX เช่น 17/06/2026 17:09"""
+    dt = easyslip_extract_datetime(data)
+    if not dt:
+        return ""
+    return dt.strftime("%d/%m/%Y %H:%M")
+
+
+def easyslip_is_same_day(data: dict) -> bool:
+    """
+    คืน True ถ้าวันที่บนสลิปตรงกับวันนี้ (เวลาไทย)
+    ถ้าอ่านวันที่จากสลิปไม่ได้ ให้ถือว่า "ผ่าน" เพื่อไม่ปฏิเสธสลิปที่ระบบอ่านวันที่ไม่ออก
+    """
+    dt = easyslip_extract_datetime(data)
+    if not dt:
+        return True
+    return dt.date() == bangkok_now().date()
+
+
 def _easyslip_account_no_match(acct: dict, expected_no_digits: str, norm_no, data: dict) -> bool:
     """ตรวจเลขบัญชีเดียว — คืน True ถ้า match (รองรับเลขบัญชีที่ถูกปิดบัง)"""
     bank_obj = acct.get("bank") or {}
@@ -5235,6 +5290,7 @@ def slip_success_flex(target, amount, credit_to_add, old_credit, slip_ref, slip_
     sender_short   = ""
     receiver_name  = ""
     receiver_short = ""
+    slip_datetime  = ""
 
     if isinstance(slip_data, dict):
         try:
@@ -5245,6 +5301,7 @@ def slip_success_flex(target, amount, credit_to_add, old_credit, slip_ref, slip_
             r = raw.get("receiver", {})
             receiver_name  = r.get("account", {}).get("name", {}).get("th") or r.get("account", {}).get("name", {}).get("en") or ""
             receiver_short = r.get("bank", {}).get("short") or ""
+            slip_datetime = easyslip_slip_datetime_text(slip_data)
         except Exception:
             pass
 
@@ -5315,6 +5372,7 @@ def slip_success_flex(target, amount, credit_to_add, old_credit, slip_ref, slip_
             "type": "box", "layout": "vertical",
             "spacing": "xs", "margin": "md",
             "contents": [
+                kv("วันที่/เวลา", slip_datetime or "-"),
                 kv("จำนวน", f"{format_topup_amount(amount)} บาท", "#16A34A"),
                 kv("เครดิตที่ได้", f"+{credit_to_add:,}", "#16A34A"),
                 kv("ชื่อ LINE", member_name),
@@ -5397,6 +5455,28 @@ def slip_warning_flex(title="⚠️ ตรวจพบรายการซ้�
         emoji="⚠️",
         details=details,
         footer_text="ถ้าคิดว่าระบบผิดพลาด ให้ติดต่อแอดมินพร้อมรูปสลิปนี้",
+    )
+
+
+def slip_wrong_day_flex(slip_dt_text=None, today_text=None):
+    """สลิปไม่ใช่ของวันนี้ — ใช้ได้เฉพาะวันต่อวันเท่านั้น"""
+    details = [
+        ("สถานะ", "สลิปไม่ใช่ของวันนี้", "#EF4444"),
+    ]
+    if slip_dt_text:
+        details.append(("วันที่/เวลาในสลิป", slip_dt_text, "#374151"))
+    if today_text:
+        details.append(("วันนี้", today_text, "#6B7280"))
+    details.append(("เงื่อนไข", "สลิปใช้ได้เฉพาะวันต่อวันเท่านั้น", "#6B7280"))
+
+    return slip_status_flex(
+        title="❌ สลิปหมดอายุ (คนละวัน)",
+        subtitle="ระบบยังไม่เติมเครดิตให้รายการนี้",
+        status_text="คนละวัน",
+        color="#EF4444",
+        emoji="❌",
+        details=details,
+        footer_text="กรุณาโอนใหม่และส่งสลิปของวันนี้เท่านั้น ห้ามใช้สลิปวันอื่น",
     )
 
 
@@ -5777,6 +5857,18 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
             except Exception:
                 pass
         return slip2go_reject_flex(data, "receiver", "บัญชีผู้รับไม่ถูกต้องหรือไม่ตรงกับบัญชีร้าน")
+
+    # ── ตรวจวันที่สลิป: ใช้ได้เฉพาะวันต่อวันเท่านั้น ───────────────────────────
+    if SLIP_SAME_DAY_ONLY and not easyslip_is_same_day(data):
+        if EASYSLIP_DEBUG_MODE:
+            print(
+                f"EASYSLIP WRONG DAY: slip_date={easyslip_slip_datetime_text(data)!r}, "
+                f"today={bangkok_now().strftime('%d/%m/%Y')!r}"
+            )
+        return slip_wrong_day_flex(
+            slip_dt_text=easyslip_slip_datetime_text(data),
+            today_text=bangkok_now().strftime("%d/%m/%Y"),
+        )
 
     # ── ตรวจสลิปซ้ำจากฐานข้อมูลของบอทเอง ───────────────────────────────────
     with STATE_LOCK:
@@ -12296,12 +12388,8 @@ def handle_clear_all(event, user_id):
             print(f"CLEAR ALL backup dir error: {e}")
 
         # ล้าง slip_topups
-        try:
-            SLIP_TOPUPS["slips"] = {}
-            SLIP_TOPUPS["updated_at"] = datetime.now().isoformat()
-            save_slip_topup_db()
-        except Exception as e:
-            print(f"CLEAR ALL slip_topup error: {e}")
+        # หมายเหตุ: CLEAR ALL "ไม่" ล้างประวัติสลิป (SLIP_TOPUPS) อีกต่อไป
+        # เพื่อกันการนำสลิปเก่ากลับมาเติมซ้ำหลังเคลียร์รอบ
 
     reply_text(
         event.reply_token,
@@ -12324,7 +12412,8 @@ def handle_clear_all(event, user_id):
             "- คืนเครดิตลูกค้าทุกบิลที่จับคู่อยู่\n"
             "- สกอและคู่ทั้งหมด\n"
             "- รอบทุกรอบ (ทุกฐาน)\n"
-            "- Backup และออเดอร์ทั้งหมด\n\n"
+            "- Backup และออเดอร์ทั้งหมด\n"
+            "(ไม่ล้างประวัติสลิป กันเติมซ้ำ)\n\n"
             "⚠️ พิมพ์ CLEAR ALL อีกครั้งภายใน 60 วินาที เพื่อยืนยัน")
         return
     CLEAR_ALL_PENDING.pop(user_id, None)
@@ -12377,17 +12466,14 @@ def handle_clear_all(event, user_id):
             os.makedirs(ROUND_BACKUP_DIR, exist_ok=True)
         except Exception as e:
             print(f"CLEAR ALL backup dir error: {e}")
-        try:
-            SLIP_TOPUPS["slips"] = {}
-            SLIP_TOPUPS["updated_at"] = datetime.now().isoformat()
-            save_slip_topup_db()
-        except Exception as e:
-            print(f"CLEAR ALL slip_topup error: {e}")
+        # หมายเหตุ: CLEAR ALL "ไม่" ล้างประวัติสลิป (SLIP_TOPUPS) อีกต่อไป
+        # เพื่อกันการนำสลิปเก่ากลับมาเติมซ้ำหลังเคลียร์รอบ
     reply_text(event.reply_token,
         "✅ CLEAR ALL เสร็จสิ้น\n\n"
         f"💰 คืนเครดิตลูกค้าแล้ว: {total_refunded_matches:,} บิล\n"
         f"💰 เครดิตคืนรวม: {total_refunded_credit:,} เครดิต\n\n"
         "🗑️ ล้างสกอ / รอบทุกรอบ / Backup / ออเดอร์ ทั้งหมดแล้ว\n"
+        "🧾 เก็บประวัติสลิปไว้เหมือนเดิม (กันเติมซ้ำ)\n"
         "พร้อมเปิดรอบใหม่ได้เลย")
 
 
