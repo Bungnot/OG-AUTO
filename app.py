@@ -4545,30 +4545,67 @@ def easyslip_extract_reference(data: dict, image_bytes: bytes):
     return extract_reference_from_slip2go(data, image_bytes)
 
 
+# อักขระที่ธนาคาร/EasySlip ใช้ปิดบังเลขบัญชี เช่น 678-7-xxx325, ****, ●●●, •••
+_ACCOUNT_MASK_CHARS = "xX*\u2022\u00b7\u2219\u25cf\u25cb\u2715\u2716\u00d7\uff0a\uff58\uff38"
+
+
+def _account_no_match_single(slip_raw, expected_no_digits: str) -> bool:
+    """
+    เทียบเลขบัญชี 1 ค่า โดยรองรับเลขบัญชีที่ถูกปิดบัง (masked)
+    ตัวอย่าง: สลิปแสดง 678-7-xxx325 ส่วนบัญชีร้านคือ 6787309325 → ถือว่าตรงกัน
+
+    เหตุผล: ถ้า strip อักขระ mask (x/●/*) ทิ้งทั้งหมดแล้วค่อยเทียบ digit ท้าย ๆ
+    เลขส่วนหน้า (6787) จะถูกดึงมาต่อกับเลขท้าย (325) กลายเป็น 7325 ซึ่งไม่ตรงกับ
+    เลขท้ายจริง 9325 ทำให้เช็คบัญชีไม่ติดทั้งที่เป็นบัญชีเดียวกัน
+    """
+    expected = re.sub(r"[^0-9]", "", str(expected_no_digits or ""))
+    if not expected:
+        return False
+
+    s = str(slip_raw or "")
+    mask_class = f"[{_ACCOUNT_MASK_CHARS}]"
+    has_mask = bool(re.search(mask_class, s))
+    digits_only = re.sub(r"[^0-9]", "", s)
+
+    if not has_mask:
+        # ไม่มีการปิดบัง → เทียบตรง หรือเทียบเลขท้าย (อย่างน้อย 4 ตัว)
+        if not digits_only:
+            return False
+        if digits_only == expected:
+            return True
+        suffix = min(len(digits_only), len(expected), 4)
+        return suffix >= 4 and digits_only[-suffix:] == expected[-suffix:]
+
+    # มีการปิดบัง: เก็บเฉพาะ digit กับ mask แล้วยุบ mask ที่ติดกันเป็นตัวเดียว
+    seq = re.sub(f"[^0-9{_ACCOUNT_MASK_CHARS}]", "", s)
+    seq = re.sub(f"{mask_class}+", "#", seq)
+
+    known_digits = sum(1 for ch in seq if ch.isdigit())
+    if known_digits < 3:
+        # เปิดเผยเลขจริงน้อยเกินไป ไม่ปลอดภัยที่จะถือว่าตรง
+        return False
+
+    # สร้าง regex: เลขที่เห็น = ต้องตรงตำแหน่ง, mask (#) = digit อย่างน้อย 1 ตัว
+    pattern = "^" + "".join(r"\d+" if ch == "#" else re.escape(ch) for ch in seq) + "$"
+    try:
+        return re.fullmatch(pattern, expected) is not None
+    except re.error:
+        return False
+
+
 def _easyslip_account_no_match(acct: dict, expected_no_digits: str, norm_no, data: dict) -> bool:
-    """ตรวจเลขบัญชีเดียว — คืน True ถ้า match"""
+    """ตรวจเลขบัญชีเดียว — คืน True ถ้า match (รองรับเลขบัญชีที่ถูกปิดบัง)"""
     bank_obj = acct.get("bank") or {}
     if isinstance(bank_obj, dict):
-        acct_no_digits = norm_no(bank_obj.get("account") or "")
-        if acct_no_digits:
-            if acct_no_digits == expected_no_digits:
-                return True
-            suffix = min(len(acct_no_digits), len(expected_no_digits), 4)
-            if suffix >= 4 and acct_no_digits[-suffix:] == expected_no_digits[-suffix:]:
-                return True
+        if _account_no_match_single(bank_obj.get("account"), expected_no_digits):
+            return True
     proxy_obj = acct.get("proxy") or {}
     if isinstance(proxy_obj, dict):
-        proxy_digits = norm_no(proxy_obj.get("account") or "")
-        if proxy_digits:
-            if proxy_digits == expected_no_digits:
-                return True
-            suffix = min(len(proxy_digits), len(expected_no_digits), 4)
-            if suffix >= 4 and proxy_digits[-suffix:] == expected_no_digits[-suffix:]:
-                return True
+        if _account_no_match_single(proxy_obj.get("account"), expected_no_digits):
+            return True
     matched = data.get("data", {}).get("matchedAccount") or {}
     if isinstance(matched, dict):
-        matched_digits = norm_no(matched.get("bankNumber") or "")
-        if matched_digits and matched_digits == expected_no_digits:
+        if _account_no_match_single(matched.get("bankNumber"), expected_no_digits):
             return True
     return False
 
