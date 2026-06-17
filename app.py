@@ -4545,31 +4545,86 @@ def easyslip_extract_reference(data: dict, image_bytes: bytes):
     return extract_reference_from_slip2go(data, image_bytes)
 
 
-def _easyslip_account_no_match(acct: dict, expected_no_digits: str, norm_no, data: dict) -> bool:
-    """ตรวจเลขบัญชีเดียว — คืน True ถ้า match"""
+def _easyslip_receiver_account_candidates(receiver: dict, acct: dict, data: dict):
+    """รวม candidate เลขบัญชีผู้รับจากหลายรูปแบบ response ของ EasySlip"""
+    candidates = []
+    seen = set()
+
+    def add_candidate(path: str, value):
+        raw = str(value or "").strip()
+        if not raw:
+            return
+        if raw in seen:
+            return
+        seen.add(raw)
+        candidates.append((path, raw))
+
     bank_obj = acct.get("bank") or {}
     if isinstance(bank_obj, dict):
-        acct_no_digits = norm_no(bank_obj.get("account") or "")
-        if acct_no_digits:
-            if acct_no_digits == expected_no_digits:
-                return True
-            suffix = min(len(acct_no_digits), len(expected_no_digits), 4)
-            if suffix >= 4 and acct_no_digits[-suffix:] == expected_no_digits[-suffix:]:
-                return True
+        add_candidate("receiver.account.bank.account", bank_obj.get("account"))
+
     proxy_obj = acct.get("proxy") or {}
     if isinstance(proxy_obj, dict):
-        proxy_digits = norm_no(proxy_obj.get("account") or "")
-        if proxy_digits:
-            if proxy_digits == expected_no_digits:
-                return True
-            suffix = min(len(proxy_digits), len(expected_no_digits), 4)
-            if suffix >= 4 and proxy_digits[-suffix:] == expected_no_digits[-suffix:]:
-                return True
+        add_candidate("receiver.account.proxy.account", proxy_obj.get("account"))
+
+    receiver_bank = receiver.get("bank") or {}
+    if isinstance(receiver_bank, dict):
+        add_candidate("receiver.bank.account", receiver_bank.get("account"))
+
+    receiver_proxy = receiver.get("proxy") or {}
+    if isinstance(receiver_proxy, dict):
+        add_candidate("receiver.proxy.account", receiver_proxy.get("account"))
+
+    add_candidate("receiver.accountNumber", receiver.get("accountNumber"))
+    add_candidate("receiver.account.number", acct.get("number"))
+    add_candidate("receiver.account.accountNumber", acct.get("accountNumber"))
+
     matched = data.get("data", {}).get("matchedAccount") or {}
     if isinstance(matched, dict):
-        matched_digits = norm_no(matched.get("bankNumber") or "")
-        if matched_digits and matched_digits == expected_no_digits:
+        add_candidate("data.matchedAccount.bankNumber", matched.get("bankNumber"))
+        add_candidate("data.matchedAccount.accountNumber", matched.get("accountNumber"))
+
+    return candidates
+
+
+def _easyslip_masked_account_match(raw_value: str, expected_no_digits: str) -> bool:
+    """
+    รองรับเลขบัญชีที่ EasySlip mask มา (เช่น 678-xxx-0325)
+    ใช้ทั้ง prefix + suffix ที่เห็นจริง เพื่อกัน false positive
+    """
+    text = str(raw_value or "").strip()
+    if not text or not expected_no_digits:
+        return False
+
+    mask_positions = [i for i, ch in enumerate(text) if ch in {"x", "X", "*", "#"}]
+    if not mask_positions:
+        return False
+
+    first_mask = min(mask_positions)
+    last_mask = max(mask_positions)
+    known_digits = re.sub(r"[^0-9]", "", text)
+    prefix = re.sub(r"[^0-9]", "", text[:first_mask])
+    suffix = re.sub(r"[^0-9]", "", text[last_mask + 1 :])
+
+    # ต้องมีข้อมูลเลขที่เห็นจริงพอสมควร และมีทั้งหัว/ท้าย จึงจะเทียบแบบ masked
+    if len(known_digits) < 6 or len(prefix) < 3 or len(suffix) < 3:
+        return False
+
+    return expected_no_digits.startswith(prefix) and expected_no_digits.endswith(suffix)
+
+
+def _easyslip_account_no_match(raw_value: str, expected_no_digits: str, norm_no) -> bool:
+    """ตรวจเลขบัญชีเดียว — คืน True ถ้า match"""
+    acct_no_digits = norm_no(raw_value or "")
+    if acct_no_digits:
+        if acct_no_digits == expected_no_digits:
             return True
+        suffix = min(len(acct_no_digits), len(expected_no_digits), 4)
+        if suffix >= 4 and acct_no_digits[-suffix:] == expected_no_digits[-suffix:]:
+            return True
+
+    if _easyslip_masked_account_match(raw_value, expected_no_digits):
+        return True
     return False
 
 
@@ -4580,21 +4635,63 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
     ถ้าไม่ได้ตั้งค่าทั้ง EASYSLIP_ACCOUNT_NUMBERS และ EASYSLIP_ACCOUNT_NAME_TH/EN
     จะไม่ตรวจ → รับสลิปทุกบัญชี (ไม่แนะนำ)
     """
-    expected_name_th = EASYSLIP_ACCOUNT_NAME_TH.strip()
-    expected_name_en = EASYSLIP_ACCOUNT_NAME_EN.strip()
-    account_numbers  = EASYSLIP_ACCOUNT_NUMBERS  # list ของเลขบัญชีที่รองรับ
-
-    # ถ้าไม่ตั้งค่าเลยแม้แต่อย่างเดียว → ไม่ตรวจ (ผ่านทั้งหมด)
-    if not account_numbers and not expected_name_th and not expected_name_en:
-        return True
-
     norm_no   = lambda s: re.sub(r"[^0-9]", "", str(s or ""))
     norm_name = lambda s: re.sub(r"\s+", "", str(s or "").lower())
+    strip_prefixes = ["นาย", "นาง", "น.ส.", "นางสาว", "mr.", "mrs.", "ms.", "miss"]
+
+    def strip_prefix(s):
+        text = str(s or "").strip()
+        for p in strip_prefixes:
+            norm_p = norm_name(p)
+            if norm_name(text).startswith(norm_p):
+                text = text[len(p):]
+        return norm_name(text)
+
+    # ใช้บัญชีร้านหลักเป็นตัวจริงเสมอ แล้วค่อยเสริมจาก EASYSLIP_ACCOUNT_NUMBERS
+    # เพื่อกันเคส .env เก่าค้างแล้วทำให้ตรวจไม่ตรงกับบัญชีที่บอทประกาศ
+    account_numbers = []
+    primary_bank_account = norm_no(BANK_ACCOUNT_NUMBER)
+    if primary_bank_account:
+        account_numbers.append(primary_bank_account)
+    for acc_no in EASYSLIP_ACCOUNT_NUMBERS:
+        digits = norm_no(acc_no)
+        if digits and digits not in account_numbers:
+            account_numbers.append(digits)
+
+    expected_name_candidates_th = []
+    expected_name_candidates_en = []
+    for raw_name in [BANK_ACCOUNT_NAME, EASYSLIP_ACCOUNT_NAME_TH]:
+        clean = strip_prefix(raw_name)
+        if clean and clean not in expected_name_candidates_th:
+            expected_name_candidates_th.append(clean)
+    clean_en = strip_prefix(EASYSLIP_ACCOUNT_NAME_EN)
+    if clean_en:
+        expected_name_candidates_en.append(clean_en)
+
+    # ถ้าไม่ตั้งค่าเลยแม้แต่อย่างเดียว → ไม่ตรวจ (ผ่านทั้งหมด)
+    if not account_numbers and not expected_name_candidates_th and not expected_name_candidates_en:
+        return True
 
     try:
-        raw      = easyslip_get_raw_slip(data)
+        raw = easyslip_get_raw_slip(data)
         receiver = raw.get("receiver", {})
-        acct     = receiver.get("account", {})
+        if not isinstance(receiver, dict):
+            receiver = {}
+        acct = receiver.get("account", {})
+        if not isinstance(acct, dict):
+            acct = {}
+        account_candidates = _easyslip_receiver_account_candidates(receiver, acct, data)
+        strict_paths = {
+            "receiver.account.bank.account",
+            "receiver.bank.account",
+            "receiver.accountNumber",
+            "receiver.account.number",
+            "receiver.account.accountNumber",
+            "data.matchedAccount.bankNumber",
+            "data.matchedAccount.accountNumber",
+        }
+        strict_account_candidates = [(path, value) for path, value in account_candidates if path in strict_paths]
+        has_strict_account_evidence = bool(strict_account_candidates)
 
         # ── 1. เทียบเลขบัญชี (วนทุกบัญชีที่ตั้งไว้) ─────────────────────────
         if account_numbers:
@@ -4602,63 +4699,71 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
                 expected_no_digits = norm_no(acc_no)
                 if not expected_no_digits:
                     continue
-                if _easyslip_account_no_match(acct, expected_no_digits, norm_no, data):
-                    return True  # match บัญชีใดบัญชีหนึ่ง → ผ่าน
+                for _, raw_account in account_candidates:
+                    if _easyslip_account_no_match(raw_account, expected_no_digits, norm_no):
+                        return True  # match บัญชีใดบัญชีหนึ่ง → ผ่าน
 
-            # ไม่ match กับบัญชีใดเลย → ปฏิเสธ
-            if EASYSLIP_DEBUG_MODE:
-                try:
-                    acct_bank  = (acct.get("bank") or {})
-                    acct_proxy = (acct.get("proxy") or {})
-                    print(
-                        f"EASYSLIP RECEIVER FAIL (no account match): "
-                        f"expected_list={account_numbers!r}, "
-                        f"got_bank={norm_no(acct_bank.get('account', ''))!r}, "
-                        f"got_proxy={norm_no(acct_proxy.get('account', ''))!r}"
-                    )
-                except Exception:
-                    pass
-            return False
+            # ถ้ามีเลขบัญชีจาก response ชัดเจน (strict path) แต่ไม่ตรงเลย -> ปฏิเสธทันที
+            if has_strict_account_evidence:
+                if EASYSLIP_DEBUG_MODE:
+                    try:
+                        print(
+                            f"EASYSLIP RECEIVER FAIL (no account match): "
+                            f"expected_list={account_numbers!r}, "
+                            f"got_strict_accounts={strict_account_candidates!r}, "
+                            f"got_all_accounts={account_candidates!r}"
+                        )
+                    except Exception:
+                        pass
+                return False
 
-        # ── 2. เทียบชื่อบัญชี (ใช้เฉพาะกรณีไม่ได้ตั้งค่าเลขบัญชีเลย) ──────────
-        name_th = norm_name(acct.get("name", {}).get("th") or "")
-        name_en = norm_name(acct.get("name", {}).get("en") or "")
-
-        prefixes = ["นาย", "นาง", "น.ส.", "นางสาว", "mr.", "mrs.", "ms.", "miss"]
-        def strip_prefix(s):
-            for p in prefixes:
-                if s.startswith(norm_name(p)):
-                    s = s[len(norm_name(p)):]
-            return s.strip()
+        # ── 2. เทียบชื่อบัญชี ────────────────────────────────────────────────
+        # ใช้ทั้งกรณีไม่ได้ตั้งเลขบัญชี หรือ response ไม่มีเลขบัญชีพอให้ตัดสิน
+        name_obj = acct.get("name") or {}
+        if not isinstance(name_obj, dict):
+            name_obj = {}
+        receiver_name_obj = receiver.get("name") or {}
+        if not isinstance(receiver_name_obj, dict):
+            receiver_name_obj = {}
+        name_th = norm_name(
+            name_obj.get("th")
+            or receiver_name_obj.get("th")
+            or receiver.get("accountNameTH")
+            or receiver.get("accountName")
+            or ""
+        )
+        name_en = norm_name(
+            name_obj.get("en")
+            or receiver_name_obj.get("en")
+            or receiver.get("accountNameEN")
+            or ""
+        )
 
         name_th_clean = strip_prefix(name_th)
         name_en_clean = strip_prefix(name_en)
 
-        if expected_name_th:
-            exp_th = strip_prefix(norm_name(expected_name_th))
-            if exp_th and (exp_th in name_th_clean or name_th_clean in exp_th):
+        for exp_th in expected_name_candidates_th:
+            if exp_th and name_th_clean and (exp_th in name_th_clean or name_th_clean in exp_th):
                 return True
             if exp_th and name_th_clean and exp_th[:4] == name_th_clean[:4]:
                 return True
 
-        if expected_name_en:
-            exp_en = strip_prefix(norm_name(expected_name_en))
-            if exp_en and (exp_en in name_en_clean or name_en_clean in exp_en):
+        for exp_en in expected_name_candidates_en:
+            if exp_en and name_en_clean and (exp_en in name_en_clean or name_en_clean in exp_en):
                 return True
             if exp_en and name_en_clean and exp_en[:4] == name_en_clean[:4]:
                 return True
 
         if EASYSLIP_DEBUG_MODE:
             try:
-                acct_bank  = (acct.get("bank") or {})
-                acct_proxy = (acct.get("proxy") or {})
                 print(
                     f"EASYSLIP RECEIVER FAIL | "
-                    f"expected_name_th={expected_name_th!r} "
-                    f"expected_name_en={expected_name_en!r} | "
-                    f"got_bank={norm_no(acct_bank.get('account', ''))!r} "
-                    f"got_proxy={norm_no(acct_proxy.get('account', ''))!r} "
-                    f"got_name_th={norm_name(acct.get('name', {}).get('th', ''))!r}"
+                    f"expected_accounts={account_numbers!r} "
+                    f"expected_name_th={expected_name_candidates_th!r} "
+                    f"expected_name_en={expected_name_candidates_en!r} | "
+                    f"got_accounts={account_candidates!r} "
+                    f"got_name_th={name_th_clean!r} "
+                    f"got_name_en={name_en_clean!r}"
                 )
             except Exception:
                 pass
