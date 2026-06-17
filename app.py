@@ -4631,16 +4631,42 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
     ถ้าไม่ได้ตั้งค่าทั้ง EASYSLIP_ACCOUNT_NUMBERS และ EASYSLIP_ACCOUNT_NAME_TH/EN
     จะไม่ตรวจ → รับสลิปทุกบัญชี (ไม่แนะนำ)
     """
-    expected_name_th = EASYSLIP_ACCOUNT_NAME_TH.strip()
-    expected_name_en = EASYSLIP_ACCOUNT_NAME_EN.strip()
-    account_numbers  = EASYSLIP_ACCOUNT_NUMBERS  # list ของเลขบัญชีที่รองรับ
-
-    # ถ้าไม่ตั้งค่าเลยแม้แต่อย่างเดียว → ไม่ตรวจ (ผ่านทั้งหมด)
-    if not account_numbers and not expected_name_th and not expected_name_en:
-        return True
-
     norm_no   = lambda s: re.sub(r"[^0-9]", "", str(s or ""))
     norm_name = lambda s: re.sub(r"\s+", "", str(s or "").lower())
+    strip_prefixes = ["นาย", "นาง", "น.ส.", "นางสาว", "mr.", "mrs.", "ms.", "miss"]
+
+    def strip_prefix(s):
+        text = str(s or "").strip()
+        for p in strip_prefixes:
+            norm_p = norm_name(p)
+            if norm_name(text).startswith(norm_p):
+                text = text[len(p):]
+        return norm_name(text)
+
+    # ใช้บัญชีร้านหลักเป็นตัวจริงเสมอ แล้วค่อยเสริมจาก EASYSLIP_ACCOUNT_NUMBERS
+    # เพื่อกันเคส .env เก่าค้างแล้วทำให้ตรวจไม่ตรงกับบัญชีที่บอทประกาศ
+    account_numbers = []
+    primary_bank_account = norm_no(BANK_ACCOUNT_NUMBER)
+    if primary_bank_account:
+        account_numbers.append(primary_bank_account)
+    for acc_no in EASYSLIP_ACCOUNT_NUMBERS:
+        digits = norm_no(acc_no)
+        if digits and digits not in account_numbers:
+            account_numbers.append(digits)
+
+    expected_name_candidates_th = []
+    expected_name_candidates_en = []
+    for raw_name in [BANK_ACCOUNT_NAME, EASYSLIP_ACCOUNT_NAME_TH]:
+        clean = strip_prefix(raw_name)
+        if clean and clean not in expected_name_candidates_th:
+            expected_name_candidates_th.append(clean)
+    clean_en = strip_prefix(EASYSLIP_ACCOUNT_NAME_EN)
+    if clean_en:
+        expected_name_candidates_en.append(clean_en)
+
+    # ถ้าไม่ตั้งค่าเลยแม้แต่อย่างเดียว → ไม่ตรวจ (ผ่านทั้งหมด)
+    if not account_numbers and not expected_name_candidates_th and not expected_name_candidates_en:
+        return True
 
     try:
         raw = easyslip_get_raw_slip(data)
@@ -4651,7 +4677,17 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
         if not isinstance(acct, dict):
             acct = {}
         account_candidates = _easyslip_receiver_account_candidates(receiver, acct, data)
-        has_account_evidence = bool(account_candidates)
+        strict_paths = {
+            "receiver.account.bank.account",
+            "receiver.bank.account",
+            "receiver.accountNumber",
+            "receiver.account.number",
+            "receiver.account.accountNumber",
+            "data.matchedAccount.bankNumber",
+            "data.matchedAccount.accountNumber",
+        }
+        strict_account_candidates = [(path, value) for path, value in account_candidates if path in strict_paths]
+        has_strict_account_evidence = bool(strict_account_candidates)
 
         # ── 1. เทียบเลขบัญชี (วนทุกบัญชีที่ตั้งไว้) ─────────────────────────
         if account_numbers:
@@ -4663,14 +4699,15 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
                     if _easyslip_account_no_match(raw_account, expected_no_digits, norm_no):
                         return True  # match บัญชีใดบัญชีหนึ่ง → ผ่าน
 
-            # ถ้ามีเลขบัญชีจาก response ชัดเจนแต่ไม่ตรงเลย -> ปฏิเสธทันที
-            if has_account_evidence:
+            # ถ้ามีเลขบัญชีจาก response ชัดเจน (strict path) แต่ไม่ตรงเลย -> ปฏิเสธทันที
+            if has_strict_account_evidence:
                 if EASYSLIP_DEBUG_MODE:
                     try:
                         print(
                             f"EASYSLIP RECEIVER FAIL (no account match): "
                             f"expected_list={account_numbers!r}, "
-                            f"got_accounts={account_candidates!r}"
+                            f"got_strict_accounts={strict_account_candidates!r}, "
+                            f"got_all_accounts={account_candidates!r}"
                         )
                     except Exception:
                         pass
@@ -4698,26 +4735,17 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
             or ""
         )
 
-        prefixes = ["นาย", "นาง", "น.ส.", "นางสาว", "mr.", "mrs.", "ms.", "miss"]
-        def strip_prefix(s):
-            for p in prefixes:
-                if s.startswith(norm_name(p)):
-                    s = s[len(norm_name(p)):]
-            return s.strip()
-
         name_th_clean = strip_prefix(name_th)
         name_en_clean = strip_prefix(name_en)
 
-        if expected_name_th:
-            exp_th = strip_prefix(norm_name(expected_name_th))
-            if exp_th and (exp_th in name_th_clean or name_th_clean in exp_th):
+        for exp_th in expected_name_candidates_th:
+            if exp_th and name_th_clean and (exp_th in name_th_clean or name_th_clean in exp_th):
                 return True
             if exp_th and name_th_clean and exp_th[:4] == name_th_clean[:4]:
                 return True
 
-        if expected_name_en:
-            exp_en = strip_prefix(norm_name(expected_name_en))
-            if exp_en and (exp_en in name_en_clean or name_en_clean in exp_en):
+        for exp_en in expected_name_candidates_en:
+            if exp_en and name_en_clean and (exp_en in name_en_clean or name_en_clean in exp_en):
                 return True
             if exp_en and name_en_clean and exp_en[:4] == name_en_clean[:4]:
                 return True
@@ -4726,10 +4754,12 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
             try:
                 print(
                     f"EASYSLIP RECEIVER FAIL | "
-                    f"expected_name_th={expected_name_th!r} "
-                    f"expected_name_en={expected_name_en!r} | "
+                    f"expected_accounts={account_numbers!r} "
+                    f"expected_name_th={expected_name_candidates_th!r} "
+                    f"expected_name_en={expected_name_candidates_en!r} | "
                     f"got_accounts={account_candidates!r} "
-                    f"got_name_th={name_th!r}"
+                    f"got_name_th={name_th_clean!r} "
+                    f"got_name_en={name_en_clean!r}"
                 )
             except Exception:
                 pass
