@@ -10966,6 +10966,61 @@ def is_add_admin_command(text: str) -> bool:
     return re.match(r"^เพิ่มแอดมิน(?:\s+|$)", clean) is not None
 
 
+def is_clear_admin_command(text: str) -> bool:
+    """ตรวจคำสั่ง ล้างแอดมิน (ต้องพิมพ์ต่อท้ายด้วยคำว่า ยืนยัน กันพิมพ์พลาด)
+    เช่น: ล้างแอดมิน ยืนยัน
+    """
+    clean = re.sub(r"\s+", "", (text or "").strip()).lower()
+    return clean in {
+        "ล้างแอดมินยืนยัน",
+        "ลางแอดมินยืนยัน",
+        "clearadminconfirm",
+        "clearadminsconfirm",
+    }
+
+
+def is_clear_admin_prompt(text: str) -> bool:
+    """ตรวจคำว่า ล้างแอดมิน เฉย ๆ (ยังไม่ยืนยัน) เพื่อเตือนวิธีใช้ที่ถูกต้อง"""
+    clean = re.sub(r"\s+", "", (text or "").strip()).lower()
+    return clean in {"ล้างแอดมิน", "ลางแอดมิน", "clearadmin", "clearadmins"}
+
+
+def clear_dynamic_admins(cleared_by_id: str):
+    """ล้างแอดมินทั้งหมดใน admins.json เหลือเฉพาะแอดมินที่ตั้งไว้ใน .env"""
+    admins = DYNAMIC_ADMINS.setdefault("admins", {})
+    count = len(admins)
+
+    if count == 0:
+        return "ℹ️ ไม่มีแอดมินที่เพิ่มผ่านแชทให้ล้าง (เหลือแค่แอดมินจาก .env อยู่แล้ว)"
+
+    cleared_rows = [
+        f"- {(info or {}).get('line_name') or fallback_name(uid)}"
+        for uid, info in admins.items()
+    ]
+
+    admins.clear()
+    DYNAMIC_ADMINS["updated_at"] = datetime.now().isoformat()
+    save_admin_db()
+
+    lines = [
+        f"✅ ล้างแอดมินเรียบร้อย ({count} คน)",
+        "",
+        "แอดมินที่ถูกล้าง:",
+        *cleared_rows,
+        "",
+        f"เหลือเฉพาะแอดมินจาก .env จำนวน {len([x for x in ADMIN_USER_IDS if x])} คน",
+    ]
+    return "\n".join(lines)
+
+
+def is_remove_admin_command(text: str) -> bool:
+    """ตรวจคำสั่ง ลบแอดมิน @ชื่อไลน์"""
+    clean = (text or "").strip()
+    # กันวรรณยุกต์/สระไทยหลุดนำหน้าข้อความจากคีย์บอร์ด
+    clean = re.sub(r"^[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+", "", clean)
+    return re.match(r"^ลบแอดมิน(?:\s+|$)", clean) is not None
+
+
 def is_admin_list_command(text: str) -> bool:
     """ตรวจคำสั่ง List / เช็คแอดมิน เพื่อดูรายชื่อแอดมินทั้งหมด"""
     clean = re.sub(r"\s+", "", (text or "").strip()).lower()
@@ -11143,6 +11198,67 @@ def add_admins_from_mentions(event, added_by_id: str):
         "คำสั่งนี้บันทึกลง admins.json แล้ว",
         "แอดมินที่เพิ่มจะใช้คำสั่งแอดมินได้ทันที และยังอยู่หลังรีสตาร์ตบอท",
     ])
+    return "\n".join(lines)
+
+
+def remove_admins_from_mentions(event, removed_by_id: str):
+    """ลบแอดมินที่ถูกแท็กในข้อความ ลบแอดมิน @ชื่อไลน์
+    ลบได้เฉพาะแอดมินที่เพิ่มผ่าน admins.json (dynamic) เท่านั้น
+    แอดมินที่ตั้งค่าจาก .env (ADMIN_USER_IDS) ต้องไปแก้ .env โดยตรง เพื่อกันลบผิดคนสำคัญผ่านแชท
+    """
+    mentioned_user_ids = extract_mentioned_user_ids(event)
+    if not mentioned_user_ids:
+        return (
+            "⚠️ ลบแอดมินไม่สำเร็จ\n\n"
+            "กรุณาแท็กชื่อ LINE ของคนที่ต้องการลบ เช่น\n"
+            "ลบแอดมิน @ชื่อไลน์\n\n"
+            "หมายเหตุ: ต้องแท็กจริงใน LINE ไม่ใช่พิมพ์ @ เอง"
+        )
+
+    admins = DYNAMIC_ADMINS.setdefault("admins", {})
+
+    removed_rows = []
+    not_found_rows = []
+    env_protected_rows = []
+
+    for target_user_id in mentioned_user_ids:
+        target_user = USERS.get(target_user_id, {}) if isinstance(USERS, dict) else {}
+        target_name = (
+            (admins.get(target_user_id) or {}).get("line_name")
+            or (target_user or {}).get("line_name")
+            or (target_user or {}).get("name")
+            or fallback_name(target_user_id)
+        )
+
+        if target_user_id in admins:
+            del admins[target_user_id]
+            removed_rows.append(f"- {target_name}")
+        elif target_user_id in ADMIN_USER_IDS:
+            env_protected_rows.append(f"- {target_name}")
+        else:
+            not_found_rows.append(f"- {target_name}")
+
+    DYNAMIC_ADMINS["updated_at"] = datetime.now().isoformat()
+    save_admin_db()
+
+    lines = []
+    if removed_rows:
+        lines.append("✅ ลบแอดมินเรียบร้อย")
+        lines.extend(["", "แอดมินที่ลบ:", *removed_rows])
+    else:
+        lines.append("⚠️ ไม่พบแอดมินที่ลบได้")
+
+    if env_protected_rows:
+        lines.extend([
+            "",
+            "ลบไม่ได้ (เพิ่มไว้ใน .env / ADMIN_USER_IDS):",
+            *env_protected_rows,
+            "ต้องไปลบ user_id ออกจาก ADMIN_USER_IDS ใน .env แล้วรีสตาร์ตบอทเอง",
+        ])
+
+    if not_found_rows:
+        lines.extend(["", "ไม่พบในรายชื่อแอดมิน:", *not_found_rows])
+
     return "\n".join(lines)
 
 
@@ -12239,6 +12355,10 @@ def is_backoffice_relevant_text(text: str, user_id: str = None) -> bool:
     # จึงไม่ปล่อยผ่าน quiet mode สำหรับหลังบ้าน/คำสั่งแอดมิน
     if is_add_admin_command(raw):
         return True
+    if is_remove_admin_command(raw):
+        return True
+    if is_clear_admin_prompt(raw) or is_clear_admin_command(raw):
+        return True
     if is_admin_list_command(raw):
         return True
     if is_credit_check_mention_command(raw):
@@ -12557,6 +12677,38 @@ def handle_message(event):
             return
 
         reply_text(event.reply_token, add_admins_from_mentions(event, user_id))
+        return
+
+    if is_remove_admin_command(text):
+        if not can_use_backoffice_command(event, user_id):
+            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะหลังบ้านหรือแอดมิน")
+            return
+
+        reply_text(event.reply_token, remove_admins_from_mentions(event, user_id))
+        return
+
+    if is_clear_admin_prompt(text):
+        if not can_use_backoffice_command(event, user_id):
+            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะหลังบ้านหรือแอดมิน")
+            return
+
+        admins_count = len(DYNAMIC_ADMINS.get("admins", {}) if isinstance(DYNAMIC_ADMINS, dict) else {})
+        reply_text(
+            event.reply_token,
+            "⚠️ ยืนยันล้างแอดมินทั้งหมด\n\n"
+            f"จะลบแอดมินที่เพิ่มผ่านแชททั้งหมด ({admins_count} คน)\n"
+            "เหลือเฉพาะแอดมินที่ตั้งไว้ใน .env เท่านั้น\n\n"
+            "หากต้องการดำเนินการ พิมพ์:\n"
+            "ล้างแอดมิน ยืนยัน",
+        )
+        return
+
+    if is_clear_admin_command(text):
+        if not can_use_backoffice_command(event, user_id):
+            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะหลังบ้านหรือแอดมิน")
+            return
+
+        reply_text(event.reply_token, clear_dynamic_admins(user_id))
         return
 
     if is_admin_list_command(text):
