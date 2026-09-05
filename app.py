@@ -7,7 +7,13 @@ import tempfile
 import threading
 import hashlib
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+    _TZ_THAI = ZoneInfo("Asia/Bangkok")
+except ImportError:
+    import pytz
+    _TZ_THAI = pytz.timezone("Asia/Bangkok")
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -48,7 +54,7 @@ ADMIN_USER_IDS = set(
 )
 # กลุ่มหลังบ้านที่อนุญาตให้ใช้คำสั่งระบบ เช่น CK / ยอดกำไร / $+ $- / ล้างออเดอร์
 # ใส่ BACKOFFICE_GROUP_ID ใน .env ได้เหมือนเดิม และมีค่า default ตามกลุ่มหลังบ้านที่กำหนดไว้
-DEFAULT_BACKOFFICE_GROUP_ID = "Cb890e7385cd34ac7b0d910bff7749540"
+DEFAULT_BACKOFFICE_GROUP_ID = "C78ac3ee47fb8bc3127a1ef1e051b69e1"
 BACKOFFICE_GROUP_ID = os.getenv("BACKOFFICE_GROUP_ID", "").strip()
 BACKOFFICE_GROUP_IDS = set(
     x.strip() for x in BACKOFFICE_GROUP_ID.split(",") if x.strip()
@@ -91,27 +97,29 @@ EASYSLIP_ENABLED = os.getenv("EASYSLIP_ENABLED", "1") == "1"
 EASYSLIP_API_KEY = os.getenv("EASYSLIP_API_KEY", "").strip()
 EASYSLIP_API_URL = os.getenv("EASYSLIP_API_URL", "https://developer.easyslip.com/api/v1/verify").strip()
 # เลขบัญชีผู้รับที่ต้องตรงกับสลิป (ถ้าไม่ตั้งค่าไว้จะไม่เช็คบัญชีผู้รับ)
-EASYSLIP_ACCOUNT_NUMBER = os.getenv("EASYSLIP_ACCOUNT_NUMBER", "6787309325").strip()
-# รองรับหลายบัญชี คั่นด้วย comma เช่น EASYSLIP_ACCOUNT_NUMBERS=6787309325,6787300932
-# ถ้าตั้ง EASYSLIP_ACCOUNT_NUMBERS จะใช้แทน EASYSLIP_ACCOUNT_NUMBER
-# แก้ไข: รองรับ comma ใน EASYSLIP_ACCOUNT_NUMBER ด้วย กันกรณีใส่หลายบัญชีผิด key
-_raw_multi = os.getenv("EASYSLIP_ACCOUNT_NUMBERS", "").strip()
-if _raw_multi:
-    EASYSLIP_ACCOUNT_NUMBERS = [x.strip() for x in _raw_multi.split(",") if x.strip()]
-elif EASYSLIP_ACCOUNT_NUMBER:
-    EASYSLIP_ACCOUNT_NUMBERS = [x.strip() for x in EASYSLIP_ACCOUNT_NUMBER.split(",") if x.strip()]
-else:
-    EASYSLIP_ACCOUNT_NUMBERS = []
-EASYSLIP_ACCOUNT_NAME_TH = os.getenv("EASYSLIP_ACCOUNT_NAME_TH", "ธนาวุฒิ แสวงศรี").strip()
-EASYSLIP_ACCOUNT_NAME_EN = os.getenv("EASYSLIP_ACCOUNT_NAME_EN", "Thanawut Saengsri").strip()
+EASYSLIP_ACCOUNT_NUMBER = os.getenv("EASYSLIP_ACCOUNT_NUMBER", "").strip()
+EASYSLIP_ACCOUNT_NAME_TH = os.getenv("EASYSLIP_ACCOUNT_NAME_TH", "").strip()
+EASYSLIP_ACCOUNT_NAME_EN = os.getenv("EASYSLIP_ACCOUNT_NAME_EN", "").strip()
 EASYSLIP_CONNECT_TIMEOUT_SECONDS = float(os.getenv("EASYSLIP_CONNECT_TIMEOUT_SECONDS", "5"))
 EASYSLIP_TIMEOUT_SECONDS = float(os.getenv("EASYSLIP_TIMEOUT_SECONDS", "20"))
 EASYSLIP_API_RETRIES = int(os.getenv("EASYSLIP_API_RETRIES", "2"))
 EASYSLIP_API_RETRY_DELAY_SECONDS = float(os.getenv("EASYSLIP_API_RETRY_DELAY_SECONDS", "1.0"))
 EASYSLIP_DEBUG_MODE = os.getenv("EASYSLIP_DEBUG_MODE", "1") == "1"
-# สลิปใช้ได้เฉพาะ "วันต่อวัน" เท่านั้น (วันที่บนสลิปต้องตรงกับวันนี้ตามเวลาไทย)
-# ปิดได้โดยตั้ง SLIP_SAME_DAY_ONLY=0
-SLIP_SAME_DAY_ONLY = os.getenv("SLIP_SAME_DAY_ONLY", "1") == "1"
+
+# รายชื่อบัญชีที่อนุญาตให้เติมออโต้ (format: account_no|name_th|name_en|bank;...)
+AUTO_TOPUP_ACCOUNTS_STR = os.getenv("AUTO_TOPUP_ACCOUNTS", "2062416164|ธนาวุฒิ แสวงศรี|Thanawut Sawaengsri|เกียรตินาคิน").strip()
+AUTO_TOPUP_ACCOUNTS_LIST = []
+if AUTO_TOPUP_ACCOUNTS_STR:
+    for acc_str in AUTO_TOPUP_ACCOUNTS_STR.split(";"):
+        parts = acc_str.split("|")
+        if len(parts) >= 3:
+            AUTO_TOPUP_ACCOUNTS_LIST.append({
+                "account_no": parts[0].strip(),
+                "name_th": parts[1].strip(),
+                "name_en": parts[2].strip(),
+                "bank": parts[3].strip() if len(parts) > 3 else ""
+            })
+
 # ตรวจภาพก่อนส่งเข้า EasySlip ด้วย QR gate
 # ปิดเป็นค่าเริ่มต้น เพราะรูปสลิปจาก LINE บางครั้งถูกบีบอัด/QR เล็ก ทำให้ OpenCV ตรวจไม่เจอและบอทเงียบ
 SLIP_IMAGE_QR_GATE_ENABLED = os.getenv("SLIP_IMAGE_QR_GATE_ENABLED", "0") == "1"
@@ -138,8 +146,7 @@ SLIP2GO_RECEIVER_ACCOUNTS_JSON = ""
 SLIP2GO_DEBUG_MODE = False
 SLIP2GO_NOTIFY_NOT_FOUND = False
 # 1 บาท = 1 เครดิต เป็นค่าเริ่มต้น ถ้าต้องการ 1 บาท = 100 เครดิต ให้ตั้ง AUTO_TOPUP_RATE=100
-# ปิดฟีเจอร์เติมออโต้: ตั้ง AUTO_TOPUP_RATE = 0 เพื่อไม่ให้เติมเครดิตอัตโนมัติ
-AUTO_TOPUP_RATE = Decimal(os.getenv("AUTO_TOPUP_RATE", "0"))
+AUTO_TOPUP_RATE = Decimal(os.getenv("AUTO_TOPUP_RATE", "1"))
 MIN_TOPUP_AMOUNT = Decimal(os.getenv("MIN_TOPUP_AMOUNT", "1"))
 
 COMMISSION_PERCENT = int(os.getenv("COMMISSION_PERCENT", "10"))
@@ -184,8 +191,6 @@ QUIET_IGNORE_WRONG_REPLY = os.getenv("QUIET_IGNORE_WRONG_REPLY", "1") == "1"
 QUIET_WARN_INVALID_REPLY_TO_PLAY = os.getenv("QUIET_WARN_INVALID_REPLY_TO_PLAY", "1") == "1"
 LINE_API_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 LINE_API_PUSH_URL = "https://api.line.me/v2/bot/message/push"
-LINE_API_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
-LINE_API_MULTICAST_URL = "https://api.line.me/v2/bot/message/multicast"
 LINE_API_PROFILE_URL = "https://api.line.me/v2/bot/profile/{user_id}"
 LINE_API_GROUP_MEMBER_PROFILE_URL = "https://api.line.me/v2/bot/group/{group_id}/member/{user_id}"
 LINE_API_ROOM_MEMBER_PROFILE_URL = "https://api.line.me/v2/bot/room/{room_id}/member/{user_id}"
@@ -198,6 +203,8 @@ app = Flask(__name__)
 # ส่ง Flex / Push แบบไม่บล็อก webhook นานเกินไป
 EXECUTOR = ThreadPoolExecutor(max_workers=PUSH_WORKERS)
 IO_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+# Semaphore จำกัด concurrent LINE push ไม่เกิน 5 ต่อวินาที กัน rate limit
+_PUSH_SEMAPHORE = threading.Semaphore(5)
 
 # ตัวแปรสำหรับ Throttling การเขียน Backup ป้องกัน I/O ถล่มดิสก์
 LAST_BACKUP_TIME = 0
@@ -207,12 +214,15 @@ BACKUP_COOLDOWN_SECONDS = 1.0
 STATE_LOCK = threading.RLock()
 FILE_LOCK = threading.RLock()
 
+# Lock สำหรับ POSTS, MATCHES, ROUNDS ป้องกัน race condition
+POSTS_LOCK = threading.RLock()
+MATCHES_LOCK = threading.RLock()
+ROUNDS_LOCK = threading.RLock()
+USERS_LOCK = threading.RLock()
+
 # กัน LINE retry / network duplicate ทำให้คำสั่งเดิมถูกคิดซ้ำ
 PROCESSED_MESSAGE_IDS = {}
 PROCESSED_MESSAGE_TTL_SECONDS = 600
-
-# CLEAR ALL pending confirmation
-CLEAR_ALL_PENDING = {}
 
 # CLEAR ALL pending confirmation
 CLEAR_ALL_PENDING = {}
@@ -315,6 +325,13 @@ STATE["opened_at_ts"] = STATE.get("opened_at_ts") or 0
 STATE["updated_at"] = STATE.get("updated_at") or None
 ROUNDS = {"1": STATE}
 ACTIVE_BASE_NO = "1"
+
+# ======================================================
+# Scoreboard History — เก็บทุกรอบที่ settled แล้วไว้แสดง สกอ
+# อ่านจาก ROUNDS ปัจจุบัน + รอบเก่าที่ archived ไว้ที่นี่
+# ไม่หายแม้จะเปิดรอบใหม่ทับฐานเดิม หรือทำ CR
+# ======================================================
+SCOREBOARD_HISTORY = {}   # key = round_id, value = snapshot dict
 
 
 def make_round_state(base_no: str):
@@ -550,7 +567,11 @@ def used_base_numbers_for_chat(chat_id: str = None):
             continue
         if chat_id and st.get("chat_id") and st.get("chat_id") != chat_id:
             continue
-        if st.get("round_id") and not st.get("backup_status") == "cleared":
+        # ฐานว่างคือ: ไม่มี round_id / settled แล้ว / ถูก clear
+        _has_round = bool(st.get("round_id"))
+        _settled = bool(st.get("settled"))
+        _cleared = st.get("backup_status") == "cleared"
+        if _has_round and not _settled and not _cleared:
             used.add(normalize_base_no(st.get("base_no") or base_no))
     return used
 
@@ -563,12 +584,32 @@ def next_available_base_no(chat_id: str = None) -> str:
     return str(i)
 
 
+def get_any_opened_round():
+    """
+    ตรวจสอบว่ามีฐานใดเปิดอยู่หรือไม่
+    คืน (base_no, camp_name, state) ถ้ามีฐานเปิด หรือ (None, None, None) ถ้าไม่มี
+    """
+    for base_no, state in ROUNDS.items():
+        if state.get("opened") and state.get("round_id"):
+            return (base_no, state.get("camp_name"), state)
+    return (None, None, None)
+
+
 def select_base_for_new_round(chat_id: str = None):
-    """เปิดรอบใหม่แบบไม่ต้องระบุฐาน: ถ้าฐานปัจจุบันมีรอบค้าง/รอบเก่า ให้ขยับฐานใหม่อัตโนมัติ"""
-    current_has_round = bool(STATE.get("round_id"))
-    current_busy = current_has_round and not STATE.get("backup_status") == "cleared"
-    if not current_busy:
-        return STATE
+    """เปิดรอบใหม่แบบไม่ต้องระบุฐาน: หาฐานว่างจริงๆ จาก ROUNDS ทั้งหมด
+    ฐานว่าง = ไม่มี round_id / settled แล้ว / ถูก clear — นำกลับมาใช้ใหม่ได้"""
+    for _bn, _st in sorted(ROUNDS.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 999):
+        if not isinstance(_st, dict):
+            continue
+        _has_round = bool(_st.get("round_id"))
+        _settled = bool(_st.get("settled"))
+        _cleared = _st.get("backup_status") == "cleared"
+        _busy = _has_round and not _settled and not _cleared
+        if not _busy:
+            # รีเซ็ต state ของฐานนี้ให้พร้อมใช้ใหม่ก่อน
+            _st.clear()
+            _st.update(make_round_state(_bn))
+            return select_round_base(_bn, chat_id=chat_id, create=False)
     return select_round_base(next_available_base_no(chat_id), chat_id=chat_id, create=True)
 
 
@@ -677,10 +718,10 @@ def parse_camp_named_round_command(text: str):
     if m:
         return build(m.group(1), f"เริ่มต้น{m.group(2)}", "two_digit_start", False)
 
-    # ปิด <ชื่อค่าย>
-    m = re.match(r"^ปิด\s+(.+)$", raw)
-    if m:
-        return build(m.group(1), "ปิด", "close", False)
+    # ปิด <ชื่อค่าย> — ให้ fuzzy close handler จัดการเอง ไม่ intercept ที่นี่
+    # m = re.match(r"^ปิด\s+(.+)$", raw)
+    # if m:
+    #     return build(m.group(1), "ปิด", "close", False)
 
     # เล่นต่อ <ชื่อค่าย>
     m = re.match(r"^(เล่นต่อ(?:ครับ|คับ|ค่ะ|คะ)?)\s+(.+)$", raw)
@@ -722,9 +763,14 @@ def is_camp_scoped_round_command(text: str) -> bool:
 
 
 def _camp_candidates_for_command(camp_name: str, chat_id: str = None, want_settled: bool = None):
-    """หา state จากชื่อค่ายแบบต้องตรงชื่อค่าย"""
+    """หา state จากชื่อค่าย รองรับ fuzzy match + ตัด (N) + ลบวรรณยุกต์"""
+    THAI_DIACRITICS_RE = re.compile(r"[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]")
+    def _sd(t): return THAI_DIACRITICS_RE.sub("", t or "")
+    def _si(t): return re.sub(r"\s*\(\d+\)\s*$", "", (t or "").strip())
+    def _norm(t): return _sd(normalize_camp_key(_si(t)))
+
+    kw = _norm(camp_name)
     rows = []
-    key = normalize_camp_key(camp_name)
     for base_no, st in sorted(ROUNDS.items(), key=lambda x: str(x[0])):
         if not isinstance(st, dict):
             continue
@@ -732,7 +778,9 @@ def _camp_candidates_for_command(camp_name: str, chat_id: str = None, want_settl
             continue
         if not st.get("round_id"):
             continue
-        if normalize_camp_key(st.get("camp_name")) != key:
+        # fuzzy match: keyword เป็น substring ของชื่อค่าย (หลัง strip dia + index)
+        cs = _norm(st.get("camp_name"))
+        if not (cs == kw or kw in cs):
             continue
         if want_settled is True and not st.get("settled"):
             continue
@@ -899,7 +947,20 @@ def select_base_for_incoming_text(event, text: str, explicit_scope=None):
         return selected
 
     # ถ้าเป็นโพสต์แผลใหม่ ให้เข้า base ที่เปิดรับล่าสุด
-    if is_front_chat(event) and parse_offer(text):
+    # รองรับทั้ง ชล500 และ เมม ชล 500 (มีชื่อค่าย)
+    _raw_offer = parse_offer(text)
+    if not _raw_offer:
+        _fc, _ft, _fb = find_camp_in_text(text)
+        if _fc and _fb:
+            _raw_offer = parse_offer(_ft)
+            if _raw_offer:
+                # เลือก base ของค่ายที่ระบุโดยตรง
+                _camp_st = ROUNDS.get(_fb)
+                if _camp_st and _camp_st.get("opened"):
+                    selected = select_round_base(_fb, chat_id=chat_id, create=False)
+                    if selected:
+                        return selected
+    if is_front_chat(event) and _raw_offer:
         selected = select_default_open_base(chat_id)
         if selected:
             return selected
@@ -970,7 +1031,7 @@ def admin_command_needs_explicit_base(text: str, chat_id: str = None) -> bool:
     if is_continue_round_command(raw):
         return True
     # เปิดรอบใหม่ไม่ต้องระบุฐานแล้ว ระบบจะเลือกฐานว่างให้อัตโนมัติ
-    if parse_open_command(raw):
+    if parse_open_command(raw) is not None:
         return False
     if parse_change_camp_command(raw):
         return True
@@ -1195,6 +1256,7 @@ def _build_single_round_backup(round_id: str, base_no: str = None, state: dict =
         return None
 
     round_id = str(round_id)
+    # Backup ทั้ง POSTS และ MATCHES ของรอบนี้
     round_posts = {
         k: v for k, v in (POSTS or {}).items()
         if isinstance(v, dict) and str(v.get("round_id") or "") == round_id
@@ -1420,9 +1482,35 @@ def _round_restore_priority(payload: dict):
     return 1
 
 
+def _cleanup_cleared_backup_files():
+    """ล้างไฟล์ backup ที่มี backup_status: cleared ออกจากระบบ"""
+    if not os.path.isdir(ROUND_BACKUP_DIR):
+        return
+    
+    try:
+        for name in os.listdir(ROUND_BACKUP_DIR):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(ROUND_BACKUP_DIR, name)
+            data = _load_round_backup_file(path)
+            if data and isinstance(data, dict):
+                st = data.get("state") or {}
+                if isinstance(st, dict) and st.get("backup_status") == "cleared":
+                    try:
+                        os.remove(path)
+                        print(f"CLEANUP CLEARED BACKUP: {name}")
+                    except Exception as e:
+                        print(f"CLEANUP CLEARED BACKUP ERROR {name}: {e}")
+    except Exception as e:
+        print(f"CLEANUP CLEARED BACKUP DIR ERROR: {e}")
+
+
 def restore_round_backup_db():
     """กู้ข้อมูลรอบ / โพสต์ / คู่ติด จากไฟล์ backup แยกต่อรอบตอนเริ่มบอท"""
     global STATE, ROUNDS, ACTIVE_BASE_NO, POSTS, MATCHES
+
+    # ล้างไฟล์ backup ที่มี backup_status: cleared ก่อน restore
+    _cleanup_cleared_backup_files()
 
     if not ROUND_BACKUP_ENABLED:
         return False
@@ -1447,32 +1535,34 @@ def restore_round_backup_db():
         return False
 
     try:
-        # เลือก 1 รอบล่าสุด/สำคัญสุดต่อฐาน เพื่อไม่ให้รอบเก่าที่เคลียร์แล้วกลับมาปน
-        selected_by_base = {}
+        # เก็บทุกรอบที่มี priority > 0 (ไม่ใช่เพียงรอบล่าสุด)
+        # เพื่อให้เห็นประวัติรอบทั้งหมดที่เปิดมา
+        # แต่ไม่โหลดรอบที่มี backup_status: cleared (เป็นรอบที่ถูก CLEAR ALL ลบไปแล้ว)
+        selected_payloads = []
         for payload in payloads:
             if not isinstance(payload, dict):
                 continue
             rid = str(payload.get("round_id") or "").strip()
             if not rid:
                 continue
-            base_no = normalize_base_no(payload.get("base_no") or (payload.get("state") or {}).get("base_no") or "1")
+            # ไม่โหลดรอบที่ถูกลบแล้ว
+            state = payload.get("state") or {}
+            if isinstance(state, dict) and state.get("backup_status") == "cleared":
+                continue
             priority = _round_restore_priority(payload)
             if priority <= 0:
                 continue
-            saved_at = str(payload.get("saved_at") or "")
-            key = (priority, saved_at)
-            old = selected_by_base.get(base_no)
-            if not old or key > old[0]:
-                selected_by_base[base_no] = (key, payload)
+            selected_payloads.append(payload)
 
-        if not selected_by_base:
+        if not selected_payloads:
             return False
 
         new_rounds = {}
         new_posts = {}
         new_matches = {}
 
-        for base_no, (_, payload) in selected_by_base.items():
+        for payload in selected_payloads:
+            base_no = normalize_base_no(payload.get("base_no") or (payload.get("state") or {}).get("base_no") or "1")
             raw_state = payload.get("state") or {}
             base_state = make_round_state(base_no)
             if isinstance(raw_state, dict):
@@ -1480,6 +1570,8 @@ def restore_round_backup_db():
             base_state["base_no"] = base_no
             if not base_state.get("round_id"):
                 base_state["round_id"] = payload.get("round_id")
+            # ใช้ base_no เป็น key ของ ROUNDS เหมือนโค้ดหลัก
+            round_id = str(payload.get("round_id") or "")
             new_rounds[base_no] = base_state
 
             if isinstance(payload.get("posts"), dict):
@@ -1489,14 +1581,32 @@ def restore_round_backup_db():
 
         if new_rounds:
             ROUNDS = new_rounds
+            # populate SCOREBOARD_HISTORY จากรอบที่ settled ที่โหลดมา
+            for rid, st in ROUNDS.items():
+                if isinstance(st, dict) and st.get("settled") and st.get("result") is not None:
+                    archive_settled_round_to_history(st)
             # เลือกฐาน active: ให้รอบที่ยังเปิด/ยังไม่จบมาก่อน
+            # ค้นหา base_no จากรอบที่มี priority สูงสุด
             active_candidates = []
-            for base_no, st in ROUNDS.items():
+            for round_id, st in ROUNDS.items():
+                base_no = st.get("base_no") or "1"
                 priority = 3 if st.get("opened") and not st.get("settled") else (2 if st.get("settled") else 1)
                 active_candidates.append((priority, float(st.get("opened_at_ts") or 0), base_no))
             active_candidates.sort()
             ACTIVE_BASE_NO = active_candidates[-1][2]
-            STATE = ROUNDS[ACTIVE_BASE_NO]
+            # ค้นหารอบที่ใช้ฐาน active นี้
+            active_state = None
+            for st in ROUNDS.values():
+                if st.get("base_no") == ACTIVE_BASE_NO and (st.get("opened") or st.get("settled")):
+                    active_state = st
+                    break
+            if not active_state:
+                # ถ้าไม่มีรอบที่เปิด ให้ใช้รอบแรก
+                for st in ROUNDS.values():
+                    if st.get("base_no") == ACTIVE_BASE_NO:
+                        active_state = st
+                        break
+            STATE = active_state or ROUNDS.get(ACTIVE_BASE_NO) or make_round_state(ACTIVE_BASE_NO)
 
         POSTS.clear()
         POSTS.update(new_posts)
@@ -1515,11 +1625,64 @@ def restore_round_backup_db():
         return False
 
 
-# เรียกกู้คืนทันทีตอนโหลดไฟล์ ก่อน webhook เริ่มรับงาน
-restore_round_backup_db()
+def refund_all_pending_matches():
+    """
+    คืนบิลอัตโนมัติตอนเริ่มบอท
+    - ค้นหาบิล status = "matched" ที่ยังไม่แจ้งผล (settled = False)
+    - คืนเครดิตให้ Maker และ Taker
+    - เปลี่ยนสถานะบิลเป็น "refunded"
+    """
+    refunded_count = 0
+    refunded_amount = 0
+    
+    try:
+        with MATCHES_LOCK:
+            for match_id, match in list(MATCHES.items()):
+                # ตรวจสอบว่าบิลยังไม่แจ้งผล และสถานะเป็น matched
+                if match.get("status") != "matched":
+                    continue
+                
+                # ค้นหารอบที่บิลนี้อยู่
+                round_id = match.get("round_id")
+                round_state = get_state_by_round_id(round_id)
+                if not round_state or round_state.get("settled"):
+                    continue
+                
+                # คืนเครดิตให้ Maker
+                maker_id = match.get("maker_id")
+                amount = match.get("amount", 0)
+                if maker_id and amount > 0:
+                    with USERS_LOCK:
+                        maker = USERS.get(maker_id)
+                        if maker:
+                            maker["credit"] = user_credit_amount(maker) + amount
+                
+                # คืนเครดิตให้ Taker
+                taker_id = match.get("taker_id")
+                if taker_id and amount > 0:
+                    with USERS_LOCK:
+                        taker = USERS.get(taker_id)
+                        if taker:
+                            taker["credit"] = user_credit_amount(taker) + amount
+                
+                # เปลี่ยนสถานะบิลเป็น "refunded"
+                match["status"] = "refunded"
+                match["refunded_at"] = now_text()
+                refunded_count += 1
+                refunded_amount += amount
+        
+        # บันทึกข้อมูลผู้ใช้ที่อัปเดต
+        if refunded_count > 0:
+            with USERS_LOCK:
+                save_user_db()
+            print(f"[REFUND] Refunded {refunded_count} matches, total amount: {refunded_amount:,}")
+    
+    except Exception as e:
+        print(f"[REFUND ERROR] {e}")
+
 
 # ฝั่งช่างไล่ / ชนะ
-CHASE_ALIASES = ["ชล", "ช่างไล่", "ล", "ไล","ไล่"]
+CHASE_ALIASES = ["ชล", "ช่างไล่","ใล่","ช่างใล่", "ล", "ไล","ไล่"]
 
 # ฝั่งช่างถอย / แพ้
 RETREAT_ALIASES = ["ชถ", "ชย", "ยั่ง", "ถอย", "ช่างรับ", "รับช่าง","รับ", "ช่างถอย", "ยั้ง", "ช่างยั้ง", "ย", "ถ"]
@@ -1967,6 +2130,12 @@ def add_profit_record(round_id: str, camp_name: str, result_value: int, profit_a
     if profit_amount <= 0:
         return
 
+    # กัน round_id ซ้ำ: ถ้า settle ถูกเรียกซ้ำด้วย round_id เดิม ห้ามบวกกำไรซ้ำ
+    existing_round_ids = {r.get("round_id") for r in PROFIT.get("rounds", [])}
+    if round_id and round_id in existing_round_ids:
+        print(f"ADD_PROFIT SKIP DUPLICATE: round_id={round_id} already recorded")
+        return
+
     PROFIT["total_profit"] = int(PROFIT.get("total_profit", 0)) + int(profit_amount)
     PROFIT.setdefault("rounds", []).append({
         "round_id": round_id,
@@ -1987,7 +2156,7 @@ def add_profit_record(round_id: str, camp_name: str, result_value: int, profit_a
 # ======================================================
 
 def now_text():
-    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    return datetime.now(tz=_TZ_THAI).strftime("%d/%m/%Y %H:%M:%S")
 
 
 def is_admin(user_id: str) -> bool:
@@ -2214,25 +2383,29 @@ def get_line_profile(user_id: str, group_id: str = None, room_id: str = None):
 
 def mark_message_processed(message_id: str) -> bool:
     """
-    คืน True ถ้า message_id นี้เคยประมวลผลแล้ว
-    ใช้กัน LINE webhook retry / duplicate ที่ทำให้คำสั่งเดียวถูกยิงซ้ำ
+    คืน True ถ้า message_id นี้เคยหลายประมวลผลแล้ว
+    ใช้กัน LINE webhook retry / duplicate ที่ทำให้คำสั่งเดิมถูกยิงซ้ำ
+    ป้องกัน race condition: ถ้า 2 threads ยิงข้อความเดิมกันพร้อมกัน ใช้ double-check
     """
     if not message_id:
         return False
 
     now_ts = time.time()
-    with STATE_LOCK:
-        if len(PROCESSED_MESSAGE_IDS) > 1000:
-            expired = [
-                mid for mid, ts in PROCESSED_MESSAGE_IDS.items()
-                if now_ts - ts > PROCESSED_MESSAGE_TTL_SECONDS
-            ]
-            for mid in expired:
-                PROCESSED_MESSAGE_IDS.pop(mid, None)
 
+    # ทำความสะอาด expired entries ก่อน — ทำนอก lock เพื่อไม่บล็อก thread อื่น
+    # อาจมี dirty read เล็กน้อยแต่ไม่กระทบ correctness (worst case: ลบช้า 1 รอบ)
+    if len(PROCESSED_MESSAGE_IDS) > 1000:
+        expired = [
+            mid for mid, ts in list(PROCESSED_MESSAGE_IDS.items())
+            if now_ts - ts > PROCESSED_MESSAGE_TTL_SECONDS
+        ]
+        for mid in expired:
+            PROCESSED_MESSAGE_IDS.pop(mid, None)
+
+    with STATE_LOCK:
+        # Double-check: ตรวจสอบว่า message_id เคยประมวลผลแล้ว
         if message_id in PROCESSED_MESSAGE_IDS:
             return True
-
         PROCESSED_MESSAGE_IDS[message_id] = now_ts
         return False
 
@@ -2404,11 +2577,21 @@ def current_round_chat_id():
 
 
 def is_current_round_chat(event) -> bool:
-    round_chat_id = current_round_chat_id()
-    if not round_chat_id:
-        # รองรับข้อมูลเก่าก่อนอัปเดต ถ้ายังไม่มี chat_id ให้ถือว่ายังไม่ล็อกห้อง
-        return True
-    return round_chat_id == get_current_chat_id(event)
+    current_chat = get_current_chat_id(event)
+    # ตรวจจาก ROUNDS ทั้งหมด ถ้ามีค่ายใดที่ chat_id ตรงกันก็ผ่าน
+    for st in ROUNDS.values():
+        if not isinstance(st, dict):
+            continue
+        if not st.get("round_id"):
+            continue
+        round_chat_id = st.get("chat_id")
+        if not round_chat_id:
+            # ยังไม่ล็อกห้อง ถือว่าผ่าน
+            return True
+        if round_chat_id == current_chat:
+            return True
+    # ไม่มีรอบเลย ถือว่าผ่าน
+    return True
 
 
 def front_room_block_text(action: str = "ใช้คำสั่งนี้") -> str:
@@ -2456,7 +2639,7 @@ def money_text(value):
 
 BANK_ACCOUNT_NUMBER = "2062416164"
 BANK_ACCOUNT_DISPLAY_NUMBER = "2062416164"
-BANK_ACCOUNT_BANK = "KKP เกียรตินาคิน"
+BANK_ACCOUNT_BANK = "เกียรตินาคิน"
 BANK_ACCOUNT_NAME = "ธนาวุฒิ แสวงศรี"
 # ใช้บัญชีเดียวสำหรับเติมเครดิตอัตโนมัติเท่านั้น
 # โค้ดจะใช้บัญชีนี้ตรวจ checkReceiver กับ Slip2Go และจะไม่รับบัญชีอื่น แม้ .env ยังมีบัญชีเก่าอยู่
@@ -2471,7 +2654,7 @@ SINGLE_AUTO_TOPUP_RECEIVER = {
 # ปรับใน .env ได้ เช่น BANK_ACCOUNT_COOLDOWN_SECONDS=10
 BANK_ACCOUNT_COOLDOWN_SECONDS = int(os.getenv("BANK_ACCOUNT_COOLDOWN_SECONDS", "10"))
 BANK_ACCOUNT_COOLDOWN_CACHE = {}
-BANK_BACKOFFICE_URL = os.getenv("BANK_BACKOFFICE_URL", "https://page.line.me/559hjdeb").strip() or "https://page.line.me/559hjdeb"
+BANK_BACKOFFICE_URL = os.getenv("BANK_BACKOFFICE_URL", "https://page.line.me/942ngdge").strip() or "https://page.line.me/942ngdge"
 
 
 def is_bank_account_request(text: str) -> bool:
@@ -2503,14 +2686,15 @@ def is_bank_account_request(text: str) -> bool:
 
 def bank_account_text() -> str:
     return (
-        "🟣 บั้งไฟอีสาน OG  💯💵\n"
+        "📌💎บั้งไฟอีสาน OG💯💵\n"
         "━━━━━━━━━━━━━━\n\n"
         "🏦 แจ้งเลขบัญชีฝากเงิน\n\n"
-        "🟣 เลขบัญชี : 2062416164\n"
-        "🟣 ธนาคาร : KKP เกียรตินาคิน\n"
-        "🟣 ชื่อบัญชี : ธนาวุฒิ แสวงศรี\n\n"
+        "🔢 เลขบัญชี : 20624161648\n"
+        "🏛 ธนาคาร : เกียรตินาคิน\n"
+        "👤 ชื่อบัญชี : ธนาวุฒิ แสวงศรี\n\n"
         "━━━━━━━━━━━━━━\n"
-        "เพื่อป้องกันมิจฉาชีพ ชื่อผู้ฝาก-ถอนต้องเป็นชื่อเดียวกันเท่านั้น ‼️ 🚫"
+        "⚠️ เพื่อป้องกันมิจฉาชีพ\n"
+        "ชื่อผู้ฝาก-ถอน ต้องเป็นชื่อเดียวกันเท่านั้น ✅"
     )
 
 def bank_account_backoffice_flex():
@@ -2532,13 +2716,28 @@ def bank_account_backoffice_flex():
                     "height": "md",
                     "action": {
                         "type": "uri",
-                        "label": "กดเข้าหลังบ้าน",
+                        "label": "ขอเลขบัญชีกดที่นี่!",
                         "uri": BANK_BACKOFFICE_URL,
                     },
                 }
             ],
         },
     }
+
+def bank_account_6_accounts_text() -> str:
+    """ข้อความบัญชีรับฝาก สำหรับแชทส่วนตัว 1-1"""
+    return (
+        "📌💎บั้งไฟอีสาน OG💯💵\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "🏦 บัญชีรับฝากเงิน\n\n"
+        "─── บัญชีที่  ───\n"
+        "🟣 ธนาคาร  : KKP เกียรตินาคิน\n"
+        "🔢 เลขบัญชี : 2062416164\n"
+        "👤 ชื่อบัญชี : ธนาวุฒิ แสวงศรี\n\n"
+        "━━━━━━━━━━━━━━\n"
+        "⚠️ เพื่อป้องกันมิจฉาชีพ\n"
+        "ชื่อผู้ฝาก-ถอน ต้องเป็นชื่อเดียวกันเท่านั้น ✅"
+    )
 
 
 def can_use_bank_account_request_in_chat(event) -> bool:
@@ -2771,10 +2970,11 @@ def admin_command_help_text() -> str:
         "- GETID = ดู groupId / roomId ของห้องนี้\n"
         "- UID = ดู UID ของผู้พิมพ์\n"
         "- UIDLIST = ดูรายชื่อสมาชิกทั้งหมด\n"
-        "- C @ชื่อไลน์ = เช็กชื่อ LINE / ID สมาชิก / ยอดเงินของคนที่แท็ก ใช้ได้ทั้งหลังบ้านและหน้าบ้าน เฉพาะแอดมิน\n"
-        "- CALL = ดูรายชื่อลูกค้าที่ระบบรู้จัก/เรียกดูข้อมูลสมาชิก\n"
+        "- C @ชื่อไลน์ = เช็กชื่อ LINE / ID สมาชิก / ยอดเงินของคนที่แท็ก\n"
+        "- CALL = ดูรายชื่อลูกค้าที่ระบบรู้จัก\n"
         "- เพิ่มแอดมิน @ชื่อไลน์ = เพิ่มแอดมินจากการ mention\n"
-        "- List / เช็คแอดมิน = ดูรายชื่อแอดมินทั้งหมดในระบบ\n\n"
+        "- List / เช็คแอดมิน = ดูรายชื่อแอดมินทั้งหมดในระบบ\n"
+        "- ล้างแอดมิน = ลบแอดมินทั้งหมดใน admins.json (เหลือแค่ใน ENV)\n\n"
         "💰 เครดิต/กำไร\n"
         "- $+ เลขสมาชิก จำนวนเงิน = เพิ่มเครดิต เช่น $+ 1 1000\n"
         "- $- เลขสมาชิก จำนวนเงิน = หักเครดิต เช่น $- 1 1000\n"
@@ -2785,12 +2985,17 @@ def admin_command_help_text() -> str:
         "- รอถอน = ส่ง Flex แจ้งสถานะถอน โดยไม่แตะเครดิต\n"
         "หมายเหตุ: ใช้ได้เฉพาะหน้าบ้านหรือแชทส่วนตัว ไม่ทำงานในหลังบ้าน\n\n"
         "🚀 จัดการค่าย/รอบ\n"
-        "- เปิด ชื่อค่าย = เปิดรอบใหม่ ระบบแยกรอบให้เอง ไม่ต้องใช้ฐาน\n"
+        "- เปิด ชื่อค่าย = เปิดรอบใหม่ (เปิดได้ไม่จำกัดค่ายพร้อมกัน)\n"
+        "- เปิด ชื่อค่าย 270-290 = เปิดพร้อมกำหนดราคาช่าง\n"
+        "- เปิด ชื่อค่าย 285 = เปิดพร้อมราคาช่างเดียว (3 หลัก)\n"
         "- ปิด = ปิดค่ายล่าสุดที่เปิดรับอยู่\n"
         "- ปิด ชื่อค่าย = ปิดค่ายที่ระบุชื่อ\n"
+        "- ช่าง ชื่อค่าย 280-290 = ยืนยัน/แก้ราคากลางหลังปิด ก่อนแจ้งผล\n"
+        "- ช่าง ชื่อค่าย 285 = ยืนยันราคากลางเดียว (3 หลัก)\n"
         "- เล่นต่อ = เปิดให้เล่นต่อในค่ายล่าสุดที่ปิดอยู่\n"
         "- เล่นต่อ ชื่อค่าย = เปิดให้ค่ายที่ระบุเล่นต่อ\n"
-        "- เปลี่ยนค่าย ชื่อค่ายใหม่ = เปลี่ยนชื่อค่ายที่เปิดผิด\n\n"
+        "- เปลี่ยนค่าย ชื่อค่ายใหม่ = เปลี่ยนชื่อค่ายที่เปิดผิด\n"
+        "- รายการเล่น = ดูค่ายที่เปิดอยู่ตอนนี้ทั้งหมด (ใช้ในกลุ่มหน้าบ้านได้)\n\n"
         "📊 ราคาช่าง/ผล/ตรวจรอบ\n"
         "- ราคาช่าง 330-360 = ตั้งราคาช่างค่ายล่าสุดที่ปิดอยู่\n"
         "- ราคาช่าง ชื่อค่าย 330-360 = ตั้งราคาช่างตามชื่อค่าย\n"
@@ -2806,9 +3011,9 @@ def admin_command_help_text() -> str:
         "- CK รวม = ดูสถานะทุกค่าย\n"
         "- คู่ติด / คู่รอบนี้ = ดูว่ารอบปัจจุบันใครติดกับใครบ้าง\n"
         "- คู่ติด ชื่อค่าย = ดูคู่ติดตามชื่อค่าย\n"
-        "- listplay = ดูสมาชิกที่เล่นกันแบบสั้น เช่น นาย A เล่น 320-350ล500 กับ นาย B\n"
+        "- listplay = ดูสมาชิกที่เล่นกันแบบสั้น\n"
         "- listplay ชื่อค่าย = ดูรายการเล่นแบบสั้นตามชื่อค่าย\n"
-        "- สกอ / สกอร์ / รายการ = ดูสรุปผลค่ายที่แจ้งผลแล้วแบบ Flex\n"
+        "- สกอ / สกอร์ = ดูสรุปผลค่ายที่แจ้งผลแล้ว (ล่าสุดอยู่ท้าย เลื่อนขวาได้ถ้า 40+ ค่าย)\n"
         "- CR ชื่อค่าย / ยืนยัน ชื่อค่าย = เคลียร์รอบตามชื่อค่าย\n\n"
         "↩️ ย้อนผล/ล้างออเดอร์\n"
         "- ย้อนผล ชื่อค่าย = ขอคืนผลที่แจ้งผิด\n"
@@ -2816,21 +3021,18 @@ def admin_command_help_text() -> str:
         "- ยกเลิกย้อนผล ชื่อค่าย = ยกเลิกคำขอย้อนผล\n"
         "- ล้างออเดอร์ = ล้างบิลทั้งหมดและเริ่มเลขออเดอร์ใหม่ที่ #1\n"
         "- ตั้งเลขออเดอร์ 100 = ล้างบิลและเริ่มเลขออเดอร์ใหม่ที่ #100\n"
-        "- ล้าง round_backups = ล้างไฟล์สำรองรอบเก่าในโฟลเดอร์ round_backups\n\n"
-        "⚠️ ถ้ามีหลายค่ายค้างอยู่ ให้ใช้ชื่อค่ายแทนฐาน เช่น แจ้งผล แอ๊ดเทวดา 350 / ราคาช่าง แอ๊ดเทวดา 330-360 / ย้อนผล แอ๊ดเทวดา"
+        "- ล้าง round_backups = ล้างไฟล์สำรองรอบเก่า\n\n"
+        "⚠️ ถ้ามีหลายค่ายค้างอยู่ ให้ระบุชื่อค่ายเสมอ\n"
+        "เช่น: แจ้งผล แอ๊ดเทวดา 350 / ช่าง แอ๊ดเทวดา 330-360 / ย้อนผล แอ๊ดเทวดา"
     )
 
-
-# ======================================================
-# Rules / how to play command
-# ======================================================
 
 def is_rules_request(text: str) -> bool:
     clean = re.sub(r"\s+", "", (text or "").strip()).lower()
     return clean in {"กต", "กติกา"}
 
 
-RULES_IMAGE_URL = "https://img2.pic.in.th/26d02e16-f7cf-403f-92ed-2a8eed65d8d1.png"
+RULES_IMAGE_URL = "https://img2.pic.in.th/b6b4bb4c-aaef-4391-b1e7-กกกกกก.png"
 
 
 def rules_flex() -> dict:
@@ -3223,6 +3425,10 @@ def two_digit_unresolved_warning() -> str:
         return ""
     if state_two_digit_start_text(STATE) != "-":
         return ""
+    # ถ้า auto-detect เริ่มต้นได้จากราคากลาง ไม่ต้องบล็อก
+    if STATE.get("base_min") is not None:
+        if auto_detect_two_digit_start(STATE.get("base_min"), STATE.get("base_max")) is not None:
+            return ""
     return (
         "ยังมีแผลเลข 2 ตัวในรอบนี้ แต่ยังไม่ได้แจ้ง เริ่มต้น1/2/3\n"
         "กรุณาแจ้งก่อนสรุปผล เช่น เริ่มต้น3"
@@ -3461,7 +3667,7 @@ def is_result_flex_reply_payload(value) -> bool:
 def is_scoreboard_command(text: str) -> bool:
     """คำสั่งดูสกอ/รายการผลรวมหลังแอดมินแจ้งผลแล้ว"""
     clean = re.sub(r"\s+", "", (text or "").strip()).lower()
-    return clean in {"สกอ", "สกอร์", "score", "scores", "รายการ"}
+    return clean in {"สกอ", "สกอร์", "score", "scores"}
 
 
 def scoreboard_status_from_round(st: dict) -> dict:
@@ -3479,136 +3685,169 @@ def scoreboard_status_from_round(st: dict) -> dict:
     return {"word": word, "icons": icons, "color": color}
 
 
-def scoreboard_rows_for_chat(chat_id: str = None):
-    """รวบรวมรอบที่แจ้งผลแล้ว เพื่อแสดงในคำสั่ง สกอ/รายการ"""
-    rows = []
-    for base_no, st in (ROUNDS or {}).items():
-        if not isinstance(st, dict):
-            continue
-        if chat_id and st.get("chat_id") and st.get("chat_id") != chat_id:
-            continue
-        if not st.get("round_id") or not st.get("settled"):
-            continue
-        if st.get("result") is None:
-            continue
+def archive_settled_round_to_history(st: dict):
+    """
+    บันทึก snapshot รอบที่ settled แล้วลง SCOREBOARD_HISTORY
+    เรียกทันทีหลัง settle_round / settle_round_all_jow สำเร็จ
+    ใช้ round_id เป็น key กันซ้ำ
+    """
+    if not isinstance(st, dict):
+        return
+    round_id = st.get("round_id")
+    if not round_id or not st.get("settled"):
+        return
+    if round_id in SCOREBOARD_HISTORY:
+        return  # มีแล้ว ไม่ต้องบันทึกซ้ำ
+    # ค่ายที่ถูกยกเลิก (result=None) ไม่ควรแสดงในสกอ
+    if st.get("result") is None:
+        return
+    SCOREBOARD_HISTORY[round_id] = {
+        "round_id": round_id,
+        "base_no": st.get("base_no") or "1",
+        "camp_name": st.get("camp_name") or "-",
+        "result": st.get("result"),
+        "base_min": st.get("base_min"),
+        "base_max": st.get("base_max"),
+        "price_mode": st.get("price_mode"),
+        "no_price_reason": st.get("no_price_reason"),
+        "two_digit_start": st.get("two_digit_start"),
+        "settled": True,
+        "opened_at_ts": st.get("opened_at_ts") or 0,
+        "settled_at_ts": st.get("settled_at_ts") or time.time(),
+        "updated_at": st.get("updated_at"),
+    }
 
+
+def scoreboard_rows_for_chat(chat_id: str = None):
+    """รวบรวมรอบที่แจ้งผลแล้ว จาก ROUNDS (memory) + SCOREBOARD_HISTORY (archive)"""
+    seen = set()
+    rows = []
+
+    def _row_from_state(st):
+        if not isinstance(st, dict):
+            return None
+        if not st.get("round_id") or not st.get("settled"):
+            return None
+        if st.get("result") is None or st.get("result") == "cancelled":
+            return None
         status = scoreboard_status_from_round(st)
         try:
-            opened_sort = float(st.get("opened_at_ts") or 0)
+            settled_sort = float(st.get("settled_at_ts") or st.get("opened_at_ts") or 0)
         except Exception:
-            opened_sort = 0
-        rows.append({
-            "sort": (opened_sort, str(normalize_base_no(st.get("base_no") or base_no))),
-            "base_no": normalize_base_no(st.get("base_no") or base_no),
+            settled_sort = 0
+        base_no = normalize_base_no(st.get("base_no") or "1")
+        return {
+            "sort": (settled_sort, base_no),
+            "base_no": base_no,
             "camp_name": st.get("camp_name") or "-",
             "price_text": state_public_price_text_no_start(st),
             "result_text": str(st.get("result") or "-"),
             "status_word": status.get("word"),
             "status_icons": status.get("icons"),
             "status_color": status.get("color"),
-        })
+        }
 
+    # 1. รอบที่ยังอยู่ใน ROUNDS (รอบปัจจุบันหรือรอบที่ยังไม่ถูก reuse)
+    for base_no, st in (ROUNDS or {}).items():
+        row = _row_from_state(st)
+        if row and st.get("round_id") not in seen:
+            seen.add(st.get("round_id"))
+            rows.append(row)
+
+    # 2. รอบเก่าจาก SCOREBOARD_HISTORY ที่ ROUNDS ไม่มีแล้ว
+    for round_id, st in (SCOREBOARD_HISTORY or {}).items():
+        if round_id in seen:
+            continue
+        row = _row_from_state(st)
+        if row:
+            seen.add(round_id)
+            rows.append(row)
+
+    # เรียงจากเก่าไปใหม่ → ค่ายล่าสุดแจ้งผลจะอยู่ท้ายสุด
     rows.sort(key=lambda x: x.get("sort") or (0, ""))
     return rows
 
 
-def scoreboard_flex_for_chat(chat_id: str = None, limit: int = 25):
-    """Flex สรุปสกอค่าย: ชื่อค่าย / ราคาช่าง / ผล+emoji พร้อมนับ ชนะ แพ้ จาว อัตโนมัติ"""
-    rows = scoreboard_rows_for_chat(chat_id)
+def _build_scoreboard_flex_from_rows(rows, limit: int = 120):
+    """แบบสวย xs font — 15 rows/bubble, 4 bubble/carousel (~35KB) เลื่อนขวาได้
+    ชื่อค่าย 6 ตัว, ราคาช่าง center, ผล end — ไม่ติดกัน
+    120 รายการ = 8 bubble = 2 carousel (reply + push)
+    """
     if not rows:
         return None
 
     win_count = sum(1 for r in rows if r.get("status_word") == "ชนะ")
     lose_count = sum(1 for r in rows if r.get("status_word") == "แพ้")
     jow_count = sum(1 for r in rows if r.get("status_word") == "จาว")
-    today_text = datetime.now().strftime("%d/%m/%Y")
+    today_text = datetime.now(tz=_TZ_THAI).strftime("%d/%m/%Y")
+    total = len(rows[:limit])
 
-    table_contents = [
-        {
-            "type": "box",
-            "layout": "horizontal",
-            "backgroundColor": "#F3F4F6",
-            "paddingAll": "6px",
-            "contents": [
-                {"type": "text", "text": "#", "size": "xs", "weight": "bold", "color": "#475569", "flex": 1},
-                {"type": "text", "text": "ชื่อค่าย", "size": "xs", "weight": "bold", "color": "#475569", "flex": 5},
-                {"type": "text", "text": "ราคาช่าง", "size": "xs", "weight": "bold", "align": "end", "color": "#475569", "flex": 3},
-                {"type": "text", "text": "ผล", "size": "xs", "weight": "bold", "align": "end", "color": "#475569", "flex": 3},
-            ],
-        }
-    ]
-
-    for idx, row in enumerate(rows[:limit], start=1):
-        table_contents.extend([
+    def _make_bubble(page_rows, start_idx, p_no, total_pages):
+        table_contents = [
             {
-                "type": "box",
-                "layout": "horizontal",
-                "paddingTop": "7px",
-                "paddingBottom": "7px",
+                "type": "box", "layout": "horizontal",
+                "backgroundColor": "#F3F4F6", "paddingAll": "6px",
                 "contents": [
-                    {"type": "text", "text": f"{idx}.", "size": "xs", "weight": "bold", "color": "#334155", "flex": 1},
-                    {"type": "text", "text": row.get("camp_name") or "-", "size": "xs", "weight": "bold", "wrap": True, "color": "#0F172A", "flex": 5},
-                    {"type": "text", "text": row.get("price_text") or "-", "size": "xs", "weight": "bold", "align": "end", "color": "#0F172A", "flex": 3, "adjustMode": "shrink-to-fit", "maxLines": 1},
-                    {"type": "text", "text": f"{row.get('result_text')} {row.get('status_icons')}", "size": "xs", "weight": "bold", "align": "end", "color": row.get("status_color") or "#111827", "flex": 3, "adjustMode": "shrink-to-fit", "maxLines": 1},
+                    {"type": "text", "text": "#", "size": "xs", "weight": "bold", "color": "#475569", "flex": 2},
+                    {"type": "text", "text": "ชื่อค่าย", "size": "xs", "weight": "bold", "color": "#475569", "flex": 5},
+                    {"type": "text", "text": "ช่าง", "size": "xs", "weight": "bold", "align": "center", "color": "#475569", "flex": 4},
+                    {"type": "text", "text": "ผล", "size": "xs", "weight": "bold", "align": "end", "color": "#475569", "flex": 3},
+                ],
+            }
+        ]
+        for idx, row in enumerate(page_rows, start=start_idx):
+            table_contents.extend([
+                {
+                    "type": "box", "layout": "horizontal",
+                    "paddingTop": "6px", "paddingBottom": "6px",
+                    "contents": [
+                        {"type": "text", "text": f"{idx}.", "size": "xs", "color": "#334155", "flex": 2},
+                        {"type": "text", "text": row.get("camp_name") or "-", "size": "xs", "color": "#0F172A", "flex": 5, "wrap": False, "maxLines": 1},
+                        {"type": "text", "text": row.get("price_text") or "-", "size": "xs", "align": "center", "color": "#475569", "flex": 4},
+                        {"type": "text", "text": f"{row.get('result_text')} {row.get('status_icons', '')}", "size": "xs", "align": "end", "color": row.get("status_color") or "#111827", "flex": 3},
+                    ],
+                },
+                {"type": "separator", "color": "#E5E7EB"},
+            ])
+        return {
+            "type": "bubble", "size": "giga",
+            "body": {
+                "type": "box", "layout": "vertical", "paddingAll": "10px", "backgroundColor": "#FFFFFF",
+                "contents": [
+                    {"type": "text", "text": "📋 ผลบั้งไฟ 📋", "size": "lg", "weight": "bold", "align": "center", "color": "#0F172A"},
+                    {"type": "text", "text": f"🗓️ {today_text}  |  หน้า {p_no}/{total_pages}", "size": "xs", "align": "center", "color": "#64748B", "margin": "xs"},
+                    {"type": "text", "text": f"✅ ชนะ {win_count}   ❌ แพ้ {lose_count}   ⛔ จาว {jow_count}   รวม {total} ค่าย", "size": "sm", "weight": "bold", "align": "center", "color": "#111827", "margin": "md", "wrap": True},
+                    {"type": "box", "layout": "vertical", "margin": "md", "contents": table_contents},
                 ],
             },
-            {"type": "separator", "color": "#E5E7EB"},
-        ])
+        }
 
-    if len(rows) > limit:
-        table_contents.append({
-            "type": "text",
-            "text": f"มีรายการเพิ่มเติมอีก {len(rows) - limit:,} ค่าย",
-            "size": "xs",
-            "color": "#64748B",
-            "wrap": True,
-            "margin": "md",
-        })
+    per_page = 15
+    bubbles_per_carousel = 4  # 4 × ~8.8KB = ~35KB ✅
+    all_pages = [rows[i:i+per_page] for i in range(0, total, per_page)]
+    total_pages = len(all_pages)
 
-    return {
-        "type": "bubble",
-        "size": "giga",
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "paddingAll": "10px",
-            "backgroundColor": "#FFFFFF",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": "📋 ผลบั้งไฟ 📋",
-                    "size": "lg",
-                    "weight": "bold",
-                    "align": "center",
-                    "color": "#0F172A",
-                },
-                {
-                    "type": "text",
-                    "text": f"🗓️ วันที่ {today_text}",
-                    "size": "xs",
-                    "align": "center",
-                    "color": "#64748B",
-                    "margin": "xs",
-                },
-                {
-                    "type": "text",
-                    "text": f"✅ ชนะ {win_count}   ❌ แพ้ {lose_count}   ⛔ จาว {jow_count}",
-                    "size": "sm",
-                    "weight": "bold",
-                    "align": "center",
-                    "color": "#111827",
-                    "margin": "md",
-                    "wrap": True,
-                },
-                {
-                    "type": "box",
-                    "layout": "vertical",
-                    "margin": "md",
-                    "contents": table_contents,
-                },
-            ],
-        },
-    }
+    if total_pages == 1:
+        return _make_bubble(all_pages[0], 1, 1, 1)
+
+    all_bubbles = []
+    start = 1
+    for p_no, page_rows in enumerate(all_pages, start=1):
+        all_bubbles.append(_make_bubble(page_rows, start, p_no, total_pages))
+        start += len(page_rows)
+
+    carousels = []
+    for i in range(0, len(all_bubbles), bubbles_per_carousel):
+        chunk = all_bubbles[i:i+bubbles_per_carousel]
+        carousels.append(chunk[0] if len(chunk) == 1 else {"type": "carousel", "contents": chunk})
+
+    return carousels[0] if len(carousels) == 1 else carousels
+
+
+def scoreboard_flex_for_chat(chat_id: str = None, limit: int = 120):
+    """Flex สกอค่าย — ใช้ _build_scoreboard_flex_from_rows"""
+    rows = scoreboard_rows_for_chat(chat_id)
+    return _build_scoreboard_flex_from_rows(rows, limit=limit)
 
 
 def scoreboard_empty_text(chat_id: str = None) -> str:
@@ -3770,8 +4009,12 @@ def get_match_price_range(match):
     st = get_state_by_round_id(match.get("round_id")) or STATE
 
     if match.get("is_two_digit_price"):
+        _two_digit_start = st.get("two_digit_start")
+        # ถ้ายังไม่มี two_digit_start แต่มีราคากลาง ให้ auto-detect จากราคากลางเลย
+        if _two_digit_start is None and st.get("base_min") is not None:
+            _two_digit_start = auto_detect_two_digit_start(st.get("base_min"), st.get("base_max"))
         return two_digit_tokens_to_price_range(
-            st.get("two_digit_start"),
+            _two_digit_start,
             match.get("two_digit_min_token"),
             match.get("two_digit_max_token"),
             st.get("base_min"),
@@ -4431,22 +4674,22 @@ def call_easyslip_api(image_bytes: bytes):
 
     # V2 endpoint และ header ใหม่
     api_url = "https://api.easyslip.com/v2/verify/bank"
-    headers = {"Authorization": f"Bearer {EASYSLIP_API_KEY}"}
 
     attempts = max(1, int(EASYSLIP_API_RETRIES or 1))
     last_status = None
     last_data = None
 
+    # V2 ใช้ multipart/form-data field=image (ไม่ใช่ JSON+base64)
     for attempt in range(1, attempts + 1):
         try:
-            # V2 ใช้ field ชื่อ "image" (ไม่ใช่ "file" แบบ V1)
+            headers = {
+                "Authorization": f"Bearer {EASYSLIP_API_KEY}",
+            }
             files = {"image": ("slip.jpg", image_bytes, "image/jpeg")}
-            form_data = {"checkDuplicate": "true"}
             response = requests.post(
                 api_url,
                 headers=headers,
                 files=files,
-                data=form_data,
                 timeout=(EASYSLIP_CONNECT_TIMEOUT_SECONDS, EASYSLIP_TIMEOUT_SECONDS),
             )
             last_status = response.status_code
@@ -4548,209 +4791,187 @@ def easyslip_extract_reference(data: dict, image_bytes: bytes):
     return extract_reference_from_slip2go(data, image_bytes)
 
 
-# อักขระที่ธนาคาร/EasySlip ใช้ปิดบังเลขบัญชี เช่น 678-7-xxx325, ****, ●●●, •••
-_ACCOUNT_MASK_CHARS = "xX*\u2022\u00b7\u2219\u25cf\u25cb\u2715\u2716\u00d7\uff0a\uff58\uff38"
-
-
-def _account_no_match_single(slip_raw, expected_no_digits: str) -> bool:
+def easyslip_extract_trans_date(data: dict):
     """
-    เทียบเลขบัญชี 1 ค่า โดยรองรับเลขบัญชีที่ถูกปิดบัง (masked)
-    ตัวอย่าง: สลิปแสดง 678-7-xxx325 ส่วนบัญชีร้านคือ 6787309325 → ถือว่าตรงกัน
-
-    เหตุผล: ถ้า strip อักขระ mask (x/●/*) ทิ้งทั้งหมดแล้วค่อยเทียบ digit ท้าย ๆ
-    เลขส่วนหน้า (6787) จะถูกดึงมาต่อกับเลขท้าย (325) กลายเป็น 7325 ซึ่งไม่ตรงกับ
-    เลขท้ายจริง 9325 ทำให้เช็คบัญชีไม่ติดทั้งที่เป็นบัญชีเดียวกัน
-    """
-    expected = re.sub(r"[^0-9]", "", str(expected_no_digits or ""))
-    if not expected:
-        return False
-
-    s = str(slip_raw or "")
-    mask_class = f"[{_ACCOUNT_MASK_CHARS}]"
-    has_mask = bool(re.search(mask_class, s))
-    digits_only = re.sub(r"[^0-9]", "", s)
-
-    if not has_mask:
-        # ไม่มีการปิดบัง → เทียบตรง หรือเทียบเลขท้าย (อย่างน้อย 4 ตัว)
-        if not digits_only:
-            return False
-        if digits_only == expected:
-            return True
-        suffix = min(len(digits_only), len(expected), 4)
-        return suffix >= 4 and digits_only[-suffix:] == expected[-suffix:]
-
-    # มีการปิดบัง: เก็บเฉพาะ digit กับ mask แล้วยุบ mask ที่ติดกันเป็นตัวเดียว
-    seq = re.sub(f"[^0-9{_ACCOUNT_MASK_CHARS}]", "", s)
-    seq = re.sub(f"{mask_class}+", "#", seq)
-
-    known_digits = sum(1 for ch in seq if ch.isdigit())
-    if known_digits < 3:
-        # เปิดเผยเลขจริงน้อยเกินไป ไม่ปลอดภัยที่จะถือว่าตรง
-        return False
-
-    # สร้าง regex: เลขที่เห็น = ต้องตรงตำแหน่ง, mask (#) = digit อย่างน้อย 1 ตัว
-    pattern = "^" + "".join(r"\d+" if ch == "#" else re.escape(ch) for ch in seq) + "$"
-    try:
-        return re.fullmatch(pattern, expected) is not None
-    except re.error:
-        return False
-
-
-# เขตเวลาไทย (+07:00) ใช้สำหรับเทียบ "วันต่อวัน" ของสลิปแบบไม่อิง TZ ของเครื่อง
-BANGKOK_TZ = timezone(timedelta(hours=7))
-
-
-def bangkok_now() -> datetime:
-    """เวลาปัจจุบันตามเขตเวลาไทย (อิง UTC จึงไม่เพี้ยนแม้เครื่องตั้ง TZ อื่น)"""
-    return datetime.now(timezone.utc).astimezone(BANGKOK_TZ)
-
-
-def easyslip_extract_datetime(data: dict):
-    """
-    อ่านวันเวลาที่โอนจาก EasySlip V2: data.rawSlip.date (ISO 8601)
-    คืน datetime ที่แปลงเป็นเขตเวลาไทยแล้ว หรือ None ถ้าอ่านไม่ได้
+    อ่านวันที่โอนจาก EasySlip V2 response
+    ลำดับการหา: data.rawSlip.transDate -> data.rawSlip.date -> data.rawSlip.datetime -> walk_json fallback
+    คืน string ISO หรือ None ถ้าหาไม่ได้
     """
     try:
         raw = easyslip_get_raw_slip(data)
-        ds = raw.get("date")
-        if not ds:
-            return None
-        s = str(ds).strip()
-        if not s:
-            return None
-        # รองรับรูปแบบที่ลงท้ายด้วย Z (UTC)
-        s = s.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(s)
-        # ถ้าไม่มีข้อมูลเขตเวลา ให้ถือว่าเป็นเวลาไทย
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=BANGKOK_TZ)
-        return dt.astimezone(BANGKOK_TZ)
+        for field in ("transDate", "date", "datetime", "transferDate", "transactionDate", "transferredAt"):
+            val = raw.get(field)
+            if val:
+                return str(val).strip()
     except Exception:
-        return None
+        pass
+    # fallback: walk ทั้ง response หา field ที่ชื่อคล้าย date
+    date_keys = {"transdate", "date", "datetime", "transferdate", "transactiondate", "transferredat"}
+    for path, value in walk_json_values(data):
+        key = re.sub(r"[^a-z0-9]", "", path.split(".")[-1].lower())
+        if key in date_keys and value not in [None, ""]:
+            return str(value).strip()
+    return None
 
 
-def easyslip_slip_datetime_text(data: dict) -> str:
-    """ข้อความวันเวลาโอนสำหรับแสดงบน FLEX เช่น 17/06/2026 17:09"""
-    dt = easyslip_extract_datetime(data)
-    if not dt:
-        return ""
-    return dt.strftime("%d/%m/%Y %H:%M")
-
-
-def easyslip_is_same_day(data: dict) -> bool:
+def easyslip_check_slip_date_today(data: dict):
     """
-    คืน True ถ้าวันที่บนสลิปตรงกับวันนี้ (เวลาไทย)
-    ถ้าอ่านวันที่จากสลิปไม่ได้ ให้ถือว่า "ผ่าน" เพื่อไม่ปฏิเสธสลิปที่ระบบอ่านวันที่ไม่ออก
+    ตรวจสอบว่าสลิปเป็นวันปัจจุบัน (ตามเวลา server)
+    คืน (True, None) ถ้าผ่าน
+    คืน (False, reason_str) ถ้าไม่ผ่าน
+    คืน (None, None) ถ้าหาวันที่ไม่ได้ (ให้ผ่านไปก่อนเพื่อความปลอดภัย)
     """
-    dt = easyslip_extract_datetime(data)
-    if not dt:
-        return True
-    return dt.date() == bangkok_now().date()
-
-
-def _easyslip_account_no_match(acct: dict, expected_no_digits: str, norm_no, data: dict) -> bool:
-    """ตรวจเลขบัญชีเดียว — คืน True ถ้า match (รองรับเลขบัญชีที่ถูกปิดบัง)"""
-    bank_obj = acct.get("bank") or {}
-    if isinstance(bank_obj, dict):
-        if _account_no_match_single(bank_obj.get("account"), expected_no_digits):
-            return True
-    proxy_obj = acct.get("proxy") or {}
-    if isinstance(proxy_obj, dict):
-        if _account_no_match_single(proxy_obj.get("account"), expected_no_digits):
-            return True
-    matched = data.get("data", {}).get("matchedAccount") or {}
-    if isinstance(matched, dict):
-        if _account_no_match_single(matched.get("bankNumber"), expected_no_digits):
-            return True
-    return False
+    raw_date = easyslip_extract_trans_date(data)
+    if not raw_date:
+        # อ่านวันที่ไม่ได้ → ผ่านไปก่อน (conservative: ไม่บล็อก)
+        return None, None
+    today_str = datetime.now(tz=_TZ_THAI).strftime("%Y-%m-%d")
+    # รองรับหลายรูปแบบ: ISO 2025-06-12T15:30:00, 2025-06-12, 20250612, 12/06/2025
+    try:
+        # ISO / datetime
+        m = re.search(r"(\d{4})-(\d{2})-(\d{2})", raw_date)
+        if m:
+            slip_date = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+            if slip_date == today_str:
+                return True, None
+            return False, f"สลิปวันที่ {slip_date} ไม่ตรงกับวันนี้ ({today_str})"
+        # compact: 20250612
+        m2 = re.search(r"(\d{4})(\d{2})(\d{2})", raw_date)
+        if m2:
+            slip_date = f"{m2.group(1)}-{m2.group(2)}-{m2.group(3)}"
+            if slip_date == today_str:
+                return True, None
+            return False, f"สลิปวันที่ {slip_date} ไม่ตรงกับวันนี้ ({today_str})"
+        # dd/mm/yyyy หรือ dd-mm-yyyy
+        m3 = re.search(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})", raw_date)
+        if m3:
+            slip_date = f"{m3.group(3)}-{m3.group(2).zfill(2)}-{m3.group(1).zfill(2)}"
+            if slip_date == today_str:
+                return True, None
+            return False, f"สลิปวันที่ {slip_date} ไม่ตรงกับวันนี้ ({today_str})"
+    except Exception:
+        pass
+    # parse ไม่ได้ → ผ่านไปก่อน
+    return None, None
 
 
 def easyslip_receiver_check_passed(data: dict) -> bool:
     """
     ตรวจบัญชีผู้รับจาก EasySlip V2 response
-    รองรับหลายบัญชีผ่าน EASYSLIP_ACCOUNT_NUMBERS (คั่นด้วย comma)
-    ถ้าไม่ได้ตั้งค่าทั้ง EASYSLIP_ACCOUNT_NUMBERS และ EASYSLIP_ACCOUNT_NAME_TH/EN
-    จะไม่ตรวจ → รับสลิปทุกบัญชี (ไม่แนะนำ)
+    รับจากหลายบัญชีใน AUTO_TOPUP_ACCOUNTS หรือบัญชีเดียวใน EASYSLIP_ACCOUNT_NUMBER
     """
+    # ถ้ามี AUTO_TOPUP_ACCOUNTS ให้ตรวจสอบจากรายชื่อนั้น
+    if AUTO_TOPUP_ACCOUNTS_LIST:
+        for acc in AUTO_TOPUP_ACCOUNTS_LIST:
+            if _check_receiver_against_account(data, acc["account_no"], acc["name_th"], acc["name_en"]):
+                return True
+        return False
+    
+    # ถ้าไม่มี AUTO_TOPUP_ACCOUNTS ให้ใช้ EASYSLIP_ACCOUNT_NUMBER
+    expected_no   = EASYSLIP_ACCOUNT_NUMBER.strip()
     expected_name_th = EASYSLIP_ACCOUNT_NAME_TH.strip()
     expected_name_en = EASYSLIP_ACCOUNT_NAME_EN.strip()
-    account_numbers  = EASYSLIP_ACCOUNT_NUMBERS  # list ของเลขบัญชีที่รองรับ
 
-    # ถ้าไม่ตั้งค่าเลยแม้แต่อย่างเดียว → ไม่ตรวจ (ผ่านทั้งหมด)
-    if not account_numbers and not expected_name_th and not expected_name_en:
-        return True
+    # ❌ แก้ไข: ถ้าไม่ตั้งค่าเลย → ปฏิเสธสลิป (ไม่ผ่าน)
+    if not expected_no and not expected_name_th and not expected_name_en:
+        if EASYSLIP_DEBUG_MODE:
+            print("EASYSLIP RECEIVER CHECK FAILED: ไม่มีการตั้งค่าบัญชีผู้รับ ให้ตั้ง EASYSLIP_ACCOUNT_NUMBER หรือ AUTO_TOPUP_ACCOUNTS ใน .env")
+        return False  # ← เปลี่ยนจาก True เป็น False
+    
+    return _check_receiver_against_account(data, expected_no, expected_name_th, expected_name_en)
 
-    norm_no   = lambda s: re.sub(r"[^0-9]", "", str(s or ""))
+
+def _check_receiver_against_account(data: dict, expected_no: str, expected_name_th: str, expected_name_en: str) -> bool:
+    """
+    ตรวจสอบว่าบัญชีผู้รับตรงกับบัญชีที่คาดหวังหรือไม่
+    """
+
+    norm_no = lambda s: re.sub(r"[^0-9]", "", str(s or ""))
     norm_name = lambda s: re.sub(r"\s+", "", str(s or "").lower())
 
+    expected_no_digits = norm_no(expected_no)
+
     try:
-        raw      = easyslip_get_raw_slip(data)
+        raw = easyslip_get_raw_slip(data)
         receiver = raw.get("receiver", {})
-        acct     = receiver.get("account", {})
+        acct = receiver.get("account", {})
 
-        # ── 1. เทียบเลขบัญชี (วนทุกบัญชีที่ตั้งไว้) ─────────────────────────
-        if account_numbers:
-            for acc_no in account_numbers:
-                expected_no_digits = norm_no(acc_no)
-                if not expected_no_digits:
-                    continue
-                if _easyslip_account_no_match(acct, expected_no_digits, norm_no, data):
-                    return True  # match บัญชีใดบัญชีหนึ่ง → ผ่าน
+        # ── 1. เทียบชื่อบัญชีก่อน (แม่นยำกว่าเลขบัญชี masked) ──────────────
+        if expected_name_th or expected_name_en:
+            name_th = norm_name(acct.get("name", {}).get("th") or "")
+            name_en = norm_name(acct.get("name", {}).get("en") or "")
 
-            # ไม่ match กับบัญชีใดเลย → ปฏิเสธ
-            if EASYSLIP_DEBUG_MODE:
-                try:
-                    acct_bank  = (acct.get("bank") or {})
-                    acct_proxy = (acct.get("proxy") or {})
-                    print(
-                        f"EASYSLIP RECEIVER FAIL (no account match): "
-                        f"expected_list={account_numbers!r}, "
-                        f"got_bank={norm_no(acct_bank.get('account', ''))!r}, "
-                        f"got_proxy={norm_no(acct_proxy.get('account', ''))!r}"
-                    )
-                except Exception:
-                    pass
-            return False
+            # ตัดคำนำหน้าชื่อ ออกก่อนเทียบ
+            prefixes = ["นาย", "นาง", "น.ส.", "นางสาว", "mr.", "mrs.", "ms.", "miss"]
+            def strip_prefix(s):
+                for p in prefixes:
+                    if s.startswith(norm_name(p)):
+                        s = s[len(norm_name(p)):]
+                return s.strip()
 
-        # ── 2. เทียบชื่อบัญชี (ใช้เฉพาะกรณีไม่ได้ตั้งค่าเลขบัญชีเลย) ──────────
-        name_th = norm_name(acct.get("name", {}).get("th") or "")
-        name_en = norm_name(acct.get("name", {}).get("en") or "")
+            name_th_clean = strip_prefix(name_th)
+            name_en_clean = strip_prefix(name_en)
 
-        prefixes = ["นาย", "นาง", "น.ส.", "นางสาว", "mr.", "mrs.", "ms.", "miss"]
-        def strip_prefix(s):
-            for p in prefixes:
-                if s.startswith(norm_name(p)):
-                    s = s[len(norm_name(p)):]
-            return s.strip()
+            if expected_name_th:
+                exp_th = strip_prefix(norm_name(expected_name_th))
+                # เทียบ 2 ทิศทาง: expected ใน got หรือ got ใน expected
+                if exp_th and (exp_th in name_th_clean or name_th_clean in exp_th):
+                    return True
+                # เทียบ partial: ตัวแรกของชื่อตรงกัน (กรณี EasySlip ตัดชื่อ)
+                if exp_th and name_th_clean and (
+                    exp_th[:4] == name_th_clean[:4]  # 4 ตัวแรกตรงกัน
+                ):
+                    return True
 
-        name_th_clean = strip_prefix(name_th)
-        name_en_clean = strip_prefix(name_en)
+            if expected_name_en:
+                exp_en = strip_prefix(norm_name(expected_name_en))
+                if exp_en and (exp_en in name_en_clean or name_en_clean in exp_en):
+                    return True
+                if exp_en and name_en_clean and exp_en[:4] == name_en_clean[:4]:
+                    return True
 
-        if expected_name_th:
-            exp_th = strip_prefix(norm_name(expected_name_th))
-            if exp_th and (exp_th in name_th_clean or name_th_clean in exp_th):
-                return True
-            if exp_th and name_th_clean and exp_th[:4] == name_th_clean[:4]:
-                return True
+        # ── 2. เทียบเลขบัญชี (bank account) ─────────────────────────────────
+        if expected_no_digits:
+            bank_obj = acct.get("bank") or {}
+            if isinstance(bank_obj, dict):
+                acct_no_digits = norm_no(bank_obj.get("account") or "")
+                if acct_no_digits:
+                    # ❌ แก้ไข: ต้องเป็น exact match เท่านั้น ไม่ใช้ suffix match
+                    # เพราะ suffix match ทำให้สลิปจากคนอื่นผ่านได้
+                    if acct_no_digits == expected_no_digits:
+                        return True
+                    # ❌ ลบ suffix match ออก (บรรทัดเดิม 4915-4918)
 
-        if expected_name_en:
-            exp_en = strip_prefix(norm_name(expected_name_en))
-            if exp_en and (exp_en in name_en_clean or name_en_clean in exp_en):
-                return True
-            if exp_en and name_en_clean and exp_en[:4] == name_en_clean[:4]:
-                return True
+            # ── 3. เทียบ PromptPay proxy (เบอร์โทร / เลขบัตร) ───────────────
+            proxy_obj = acct.get("proxy") or {}
+            if isinstance(proxy_obj, dict):
+                proxy_digits = norm_no(proxy_obj.get("account") or "")
+                if proxy_digits:
+                    # ❌ แก้ไข: ต้องเป็น exact match เท่านั้น
+                    if proxy_digits == expected_no_digits:
+                        return True
+                    # ❌ ลบ suffix match ออก (บรรทัดเดิม 4927-4929)
+
+            # ── 4. matchedAccount จาก EasySlip ───────────────────────────────
+            matched = data.get("data", {}).get("matchedAccount") or {}
+            if isinstance(matched, dict):
+                matched_digits = norm_no(matched.get("bankNumber") or "")
+                # ❌ แก้ไข: ต้องเป็น exact match เท่านั้น
+                if matched_digits and matched_digits == expected_no_digits:
+                    return True
 
         if EASYSLIP_DEBUG_MODE:
             try:
-                acct_bank  = (acct.get("bank") or {})
+                acct_bank = (acct.get("bank") or {})
                 acct_proxy = (acct.get("proxy") or {})
                 print(
                     f"EASYSLIP RECEIVER FAIL | "
+                    f"expected_no={expected_no_digits!r} "
                     f"expected_name_th={expected_name_th!r} "
                     f"expected_name_en={expected_name_en!r} | "
-                    f"got_bank={norm_no(acct_bank.get('account', ''))!r} "
-                    f"got_proxy={norm_no(acct_proxy.get('account', ''))!r} "
-                    f"got_name_th={norm_name(acct.get('name', {}).get('th', ''))!r}"
+                    f"got_bank={norm_no(acct_bank.get('account',''))!r} "
+                    f"got_proxy={norm_no(acct_proxy.get('account',''))!r} "
+                    f"got_name_th={norm_name(acct.get('name',{}).get('th',''))!r}"
                 )
             except Exception:
                 pass
@@ -4758,6 +4979,8 @@ def easyslip_receiver_check_passed(data: dict) -> bool:
     except Exception as e:
         if EASYSLIP_DEBUG_MODE:
             print(f"EASYSLIP RECEIVER CHECK EXCEPTION: {e}")
+        # exception = parse error ไม่ใช่บัญชีผิด → ให้ผ่านไม่ได้
+        # คืน False เพื่อความปลอดภัย
         return False
 
     return False
@@ -5290,7 +5513,7 @@ def slip_success_flex(target, amount, credit_to_add, old_credit, slip_ref, slip_
     sender_short   = ""
     receiver_name  = ""
     receiver_short = ""
-    slip_datetime  = ""
+    trans_date_text = ""
 
     if isinstance(slip_data, dict):
         try:
@@ -5301,7 +5524,25 @@ def slip_success_flex(target, amount, credit_to_add, old_credit, slip_ref, slip_
             r = raw.get("receiver", {})
             receiver_name  = r.get("account", {}).get("name", {}).get("th") or r.get("account", {}).get("name", {}).get("en") or ""
             receiver_short = r.get("bank", {}).get("short") or ""
-            slip_datetime = easyslip_slip_datetime_text(slip_data)
+        except Exception:
+            pass
+        # ── อ่านวันที่/เวลาโอนจากสลิป ─────────────────────────────────────
+        try:
+            raw_date = easyslip_extract_trans_date(slip_data)
+            if raw_date:
+                # แปลงให้อ่านง่าย: รองรับ ISO datetime และรูปแบบอื่น
+                import re as _re
+                m_iso = _re.search(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?", raw_date)
+                if m_iso:
+                    y, mo, d, hh, mm = m_iso.group(1), m_iso.group(2), m_iso.group(3), m_iso.group(4), m_iso.group(5)
+                    trans_date_text = f"{d}/{mo}/{y}  {hh}:{mm} น."
+                else:
+                    m_date = _re.search(r"(\d{4})-(\d{2})-(\d{2})", raw_date)
+                    if m_date:
+                        y, mo, d = m_date.group(1), m_date.group(2), m_date.group(3)
+                        trans_date_text = f"{d}/{mo}/{y}"
+                    else:
+                        trans_date_text = raw_date
         except Exception:
             pass
 
@@ -5372,9 +5613,9 @@ def slip_success_flex(target, amount, credit_to_add, old_credit, slip_ref, slip_
             "type": "box", "layout": "vertical",
             "spacing": "xs", "margin": "md",
             "contents": [
-                kv("วันที่/เวลา", slip_datetime or "-"),
                 kv("จำนวน", f"{format_topup_amount(amount)} บาท", "#16A34A"),
                 kv("เครดิตที่ได้", f"+{credit_to_add:,}", "#16A34A"),
+                kv("วันที่/เวลาโอน", trans_date_text or "-", "#374151"),
                 kv("ชื่อ LINE", member_name),
                 kv("ID สมาชิก", f"#{member_no}"),
                 kv("เครดิตคงเหลือ", f"{new_credit:,}", "#16A34A"),
@@ -5455,28 +5696,6 @@ def slip_warning_flex(title="⚠️ ตรวจพบรายการซ้�
         emoji="⚠️",
         details=details,
         footer_text="ถ้าคิดว่าระบบผิดพลาด ให้ติดต่อแอดมินพร้อมรูปสลิปนี้",
-    )
-
-
-def slip_wrong_day_flex(slip_dt_text=None, today_text=None):
-    """สลิปไม่ใช่ของวันนี้ — ใช้ได้เฉพาะวันต่อวันเท่านั้น"""
-    details = [
-        ("สถานะ", "สลิปไม่ใช่ของวันนี้", "#EF4444"),
-    ]
-    if slip_dt_text:
-        details.append(("วันที่/เวลาในสลิป", slip_dt_text, "#374151"))
-    if today_text:
-        details.append(("วันนี้", today_text, "#6B7280"))
-    details.append(("เงื่อนไข", "สลิปใช้ได้เฉพาะวันต่อวันเท่านั้น", "#6B7280"))
-
-    return slip_status_flex(
-        title="❌ สลิปหมดอายุ (คนละวัน)",
-        subtitle="ระบบยังไม่เติมเครดิตให้รายการนี้",
-        status_text="คนละวัน",
-        color="#EF4444",
-        emoji="❌",
-        details=details,
-        footer_text="กรุณาโอนใหม่และส่งสลิปของวันนี้เท่านั้น ห้ามใช้สลิปวันอื่น",
     )
 
 
@@ -5813,7 +6032,6 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
         if msg == "slip_not_found" and isinstance(data, dict):
             if easyslip_is_bbl_pending(data):
                 return slip_bangkok_bank_wait_flex()
-            # 404 ทั่วไป = หาสลิปไม่เจอในระบบ
             error_code = easyslip_get_error_code(data)
             if error_code == "SLIP_NOT_FOUND":
                 return slip_not_found_wait_flex()
@@ -5842,11 +6060,20 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
         reason = f"ระบบยังไม่ยืนยันสลิป" + (f" ({error_code})" if error_code else "")
         return slip2go_reject_flex(data, "not_valid", reason)
 
-    # ── V2: ตรวจสลิปซ้ำจาก EasySlip (isDuplicate) ──────────────────────────
-    slip_ref, ref_path = easyslip_extract_reference(data, image_bytes)
+    # ── ตรวจวันที่สลิป: ต้องเป็นวันนี้เท่านั้น ──────────────────────────────
+    date_ok, date_reason = easyslip_check_slip_date_today(data)
+    if date_ok is False:
+        today_str = datetime.now(tz=_TZ_THAI).strftime("%Y-%m-%d")
+        if EASYSLIP_DEBUG_MODE:
+            print(f"EASYSLIP DATE REJECT: {date_reason}")
+        return slip_fail_flex(
+            title="❌ สลิปไม่ใช่วันนี้",
+            reason=date_reason or f"ใช้ได้เฉพาะสลิปวันที่ {today_str} เท่านั้น",
+            suggestion="กรุณาส่งสลิปที่โอนวันนี้เท่านั้น ไม่รับสลิปย้อนหลังหรือล่วงหน้า",
+        )
 
-    # ── ตรวจบัญชีผู้รับ ทุกกรณี (ทั้ง duplicate และไม่ duplicate) ────────────
-    # สำคัญ: ต้องตรวจก่อนเติมเสมอ กันสลิปโอนบัญชีอื่นถูกเติมเครดิต
+    # ── ตรวจบัญชีผู้รับ ──────────────────────────────────────────────────────
+    # สำคัญ: ตรวจก่อนเติมเสมอ กันสลิปโอนบัญชีอื่นถูกเติมเครดิต
     if not easyslip_receiver_check_passed(data):
         if EASYSLIP_DEBUG_MODE:
             try:
@@ -5858,36 +6085,10 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
                 pass
         return slip2go_reject_flex(data, "receiver", "บัญชีผู้รับไม่ถูกต้องหรือไม่ตรงกับบัญชีร้าน")
 
-    # ── ตรวจวันที่สลิป: ใช้ได้เฉพาะวันต่อวันเท่านั้น ───────────────────────────
-    if SLIP_SAME_DAY_ONLY and not easyslip_is_same_day(data):
-        if EASYSLIP_DEBUG_MODE:
-            print(
-                f"EASYSLIP WRONG DAY: slip_date={easyslip_slip_datetime_text(data)!r}, "
-                f"today={bangkok_now().strftime('%d/%m/%Y')!r}"
-            )
-        return slip_wrong_day_flex(
-            slip_dt_text=easyslip_slip_datetime_text(data),
-            today_text=bangkok_now().strftime("%d/%m/%Y"),
-        )
+    # ── อ่าน slip_ref (ใช้กัน duplicate) ─────────────────────────────────────
+    slip_ref, ref_path = easyslip_extract_reference(data, image_bytes)
 
-    # ── ตรวจสลิปซ้ำจากฐานข้อมูลของบอทเอง ───────────────────────────────────
-    with STATE_LOCK:
-        old = SLIP_TOPUPS.setdefault("slips", {}).get(slip_ref)
-    if old:
-        return slip_warning_flex(
-            title="⚠️ สลิปนี้ถูกเติมเครดิตไปแล้ว",
-            message="ระบบพบประวัติเติมเครดิตของสลิปนี้แล้ว",
-            slip_ref=slip_ref,
-            created_at=old.get("created_at", "-"),
-        )
-
-    # ── EasySlip บอก isDuplicate แต่บอทยังไม่เคยเติม ─────────────────────────
-    # (เช่น ส่งสลิปครั้งแรก error ก่อนเติม แล้วส่งซ้ำ)
-    # ผ่านการตรวจบัญชีแล้ว → เติมได้ปกติ
-    if easyslip_is_duplicate(data):
-        if EASYSLIP_DEBUG_MODE:
-            print(f"EASYSLIP DUPLICATE but not in local DB: slip_ref={slip_ref}, receiver passed, proceeding to topup")
-
+    # ── อ่านยอดเงิน ──────────────────────────────────────────────────────────
     amount, amount_path = easyslip_extract_amount(data)
     if amount is None or amount < MIN_TOPUP_AMOUNT:
         return slip_fail_flex(
@@ -5897,11 +6098,7 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
         )
 
     credit_to_add = int((amount * AUTO_TOPUP_RATE).to_integral_value(rounding="ROUND_FLOOR"))
-    
-    # ถ้า AUTO_TOPUP_RATE = 0 ให้เช็คสลิปเฉยๆ ไม่เติมเครดิต
-    check_only_mode = AUTO_TOPUP_RATE == 0
-    
-    if credit_to_add <= 0 and not check_only_mode:
+    if credit_to_add <= 0:
         return slip_fail_flex(
             title="❌ คำนวณเครดิตไม่ได้",
             reason="ยอดเครดิตที่คำนวณได้ไม่ถูกต้อง",
@@ -5911,48 +6108,23 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
     # ── Sync ชื่อ LINE ล่าสุด (background, ไม่บล็อก) ────────────────────────
     queue_profile_refresh(user_id)
 
+    # ── เช็คซ้ำ + เติมเครดิต: อยู่ใน lock เดียวกันตลอด กัน race condition ────
     with STATE_LOCK:
         slips = SLIP_TOPUPS.setdefault("slips", {})
-        
-        # ตรวจสลิปซ้ำจากฐานข้อมูล (ทั้งโหมดเช็คเฉยๆ และโหมดเติมปกติ)
+
+        # เช็คซ้ำรอบสุดท้าย (atomic — ไม่มีช่องว่างระหว่าง check กับ write)
         if slip_ref in slips:
-            old = slips.get(slip_ref, {})
+            old = slips[slip_ref]
             return slip_warning_flex(
                 title="⚠️ สลิปนี้ถูกเติมเครดิตไปแล้ว",
                 message="ระบบพบประวัติเติมเครดิตของสลิปนี้แล้ว",
                 slip_ref=slip_ref,
                 created_at=old.get("created_at", "-"),
             )
-        
-        # ถ้าเป็น check_only_mode ให้เช็คสลิปเฉยๆ ไม่เติมเครดิต แต่บันทึกประวัติ
-        if check_only_mode:
-            target = get_registered_topup_user(user_id)
-            if not target:
-                return no_member_id_topup_flex()
-            
-            # บันทึกประวัติสลิปแม้ว่าจะไม่เติมเครดิต (เพื่อกันส่งซ้ำ)
-            slips[slip_ref] = {
-                "user_id": user_id,
-                "member_no": target.get("member_no"),
-                "line_name": target.get("line_name") or target.get("name"),
-                "amount_baht": str(amount),
-                "credit_added": 0,  # ไม่เติมเครดิต
-                "old_credit": int(target.get("credit", 0) or 0),
-                "new_credit": int(target.get("credit", 0) or 0),  # ไม่เปลี่ยน
-                "ref_path": ref_path,
-                "amount_path": amount_path,
-                "line_message_id": message_id,
-                "created_at": now_text(),
-                "easyslip_response": data,
-                "check_only": True,  # ทำเครื่องหมายว่าเป็นโหมดเช็คเฉยๆ
-            }
-            
-            save_slip_topup_db()
-            
-            # แสดงผลการตรวจสลิปเฉยๆ ไม่เติมเครดิต
-            return slip_success_flex(target, amount, 0, int(target.get("credit", 0) or 0), slip_ref, slip_data=data)
-        
-        # โหมดเติมเครดิตปกติ (AUTO_TOPUP_RATE > 0)
+
+        if EASYSLIP_DEBUG_MODE and easyslip_is_duplicate(data):
+            print(f"EASYSLIP DUPLICATE but not in local DB: slip_ref={slip_ref}, receiver passed, proceeding to topup")
+
         target = get_registered_topup_user(user_id)
         if not target:
             return no_member_id_topup_flex()
@@ -5970,6 +6142,7 @@ def auto_topup_credit_from_slip(event, image_bytes: bytes = None):
             "new_credit": target["credit"],
             "ref_path": ref_path,
             "amount_path": amount_path,
+            "slip_date": easyslip_extract_trans_date(data),
             "line_message_id": message_id,
             "created_at": now_text(),
             "easyslip_response": data,
@@ -6135,6 +6308,40 @@ def reply_text_and_flex(reply_token, text, alt_text, flex_dict, quote_token=None
     return _post_line_api(LINE_API_REPLY_URL, payload, LINE_REPLY_TIMEOUT_SECONDS, "REPLY TEXT+FLEX")
 
 
+def _push_scoreboard_if_list(chat_id, score_flex):
+    """ถ้า scoreboard เป็น list (หลาย carousel) ให้ push แยกแต่ละอัน"""
+    if isinstance(score_flex, list):
+        for i, flex in enumerate(score_flex):
+            push_flex_async(chat_id, f"📋 ผลบั้งไฟ ({i+1}/{len(score_flex)})", flex)
+        return True
+    return False
+
+
+def _reply_scoreboard(reply_token, score_flex, chat_id=None):
+    """reply carousel แรก push ที่เหลือ (ถ้ามี) — กัน 50KB limit"""
+    if isinstance(score_flex, list):
+        reply_flex(reply_token, "📋 ผลบั้งไฟ", score_flex[0])
+        if chat_id and len(score_flex) > 1:
+            for i, f in enumerate(score_flex[1:], start=2):
+                push_flex_async(chat_id, f"📋 ผลบั้งไฟ ({i}/{len(score_flex)})", f)
+    else:
+        reply_flex(reply_token, "📋 ผลบั้งไฟ", score_flex)
+
+
+def reply_two_flex(reply_token, alt1, flex1, alt2, flex2):
+    """ส่ง 2 Flex ใน replyToken เดียวกัน เช่น ผลแจ้ง + สกอ"""
+    if not flex1 or not flex2:
+        return False
+    payload = {
+        "replyToken": reply_token,
+        "messages": [
+            line_flex_payload(alt1, flex1),
+            line_flex_payload(alt2, flex2),
+        ],
+    }
+    return _post_line_api(LINE_API_REPLY_URL, payload, LINE_REPLY_TIMEOUT_SECONDS, "REPLY 2FLEX")
+
+
 def push_text(to, text):
     if not to or not text:
         return False
@@ -6158,82 +6365,17 @@ def push_flex(to, alt_text, flex_dict):
 
 
 def push_text_async(to, text):
-    EXECUTOR.submit(push_text, to, text)
+    def _job():
+        with _PUSH_SEMAPHORE:
+            push_text(to, text)
+    EXECUTOR.submit(_job)
 
 
 def push_flex_async(to, alt_text, flex_dict):
-    EXECUTOR.submit(push_flex, to, alt_text, flex_dict)
-
-
-def broadcast_flex_to_users(user_ids, alt_text, flex_dict):
-    """
-    ส่ง FLEX ไปยังหลายคน โดยใช้ Broadcast API (ไม่เสียโควตา)
-    
-    ข้อดี:
-    - ไม่เสียโควตา (ไม่นับในลิมิต 35,000 ข้อความ/เดือน)
-    - ส่งได้ไม่จำกัด
-    
-    ข้อจำกัด:
-    - ต้องเป็น user_id เท่านั้น (ไม่ได้ group/room)
-    - ส่งทีละ request (ไม่ batch)
-    """
-    if not user_ids or not flex_dict:
-        return False
-    
-    # Broadcast API ต้องส่ง user_ids เป็น list
-    if isinstance(user_ids, str):
-        user_ids = [user_ids]
-    
-    payload = {
-        "to": user_ids,
-        "messages": [line_flex_payload(alt_text, flex_dict)],
-    }
-    return _post_line_api(LINE_API_BROADCAST_URL, payload, LINE_PUSH_TIMEOUT_SECONDS, f"BROADCAST FLEX to={len(user_ids)} users")
-
-
-def broadcast_flex_to_users_async(user_ids, alt_text, flex_dict):
-    """
-    ส่ง FLEX แบบ async โดยใช้ Broadcast API (ไม่เสียโควตา)
-    """
-    EXECUTOR.submit(broadcast_flex_to_users, user_ids, alt_text, flex_dict)
-
-
-def multicast_flex_to_users(user_ids, alt_text, flex_dict):
-    """
-    ส่ง FLEX ไปยังหลายคน โดยใช้ Multicast API (ไม่เสียโควตา)
-    
-    ข้อดี:
-    - ไม่เสียโควตา (ไม่นับในลิมิต 35,000 ข้อความ/เดือน)
-    - ส่งเฉพาะ user_id ที่ระบุ (ต่างจาก Broadcast ที่ส่งให้ทุกคน)
-    - รองรับสูงสุด 500 คนต่อ request
-    
-    ข้อจำกัด:
-    - ต้องเป็น user_id เท่านั้น (ไม่ได้ group/room)
-    - ส่งทีละ request (ไม่ batch)
-    """
-    if not user_ids or not flex_dict:
-        return False
-    
-    # Multicast API ต้องส่ง user_ids เป็น list
-    if isinstance(user_ids, str):
-        user_ids = [user_ids]
-    
-    # ตัด user_ids ให้ไม่เกิน 500 คน
-    if len(user_ids) > 500:
-        user_ids = user_ids[:500]
-    
-    payload = {
-        "to": user_ids,
-        "messages": [line_flex_payload(alt_text, flex_dict)],
-    }
-    return _post_line_api(LINE_API_MULTICAST_URL, payload, LINE_PUSH_TIMEOUT_SECONDS, f"MULTICAST FLEX to={len(user_ids)} users")
-
-
-def multicast_flex_to_users_async(user_ids, alt_text, flex_dict):
-    """
-    ส่ง FLEX แบบ async โดยใช้ Multicast API (ไม่เสียโควตา)
-    """
-    EXECUTOR.submit(multicast_flex_to_users, user_ids, alt_text, flex_dict)
+    def _job():
+        with _PUSH_SEMAPHORE:
+            push_flex(to, alt_text, flex_dict)
+    EXECUTOR.submit(_job)
 
 
 # ======================================================
@@ -6241,8 +6383,33 @@ def multicast_flex_to_users_async(user_ids, alt_text, flex_dict):
 # ======================================================
 
 def parse_open_command(text):
-    m = re.match(r"^เปิด\s+(.+)$", text.strip())
-    return m.group(1).strip() if m else None
+    """
+    รับคำสั่งเปิดรอบ:
+    - เปิด ชื่อค่าย               => (camp_name, None, None)
+    - เปิด ชื่อค่าย 285-305       => (camp_name, 285, 305)
+    - เปิด ชื่อค่าย 320           => (camp_name, 320, 320)
+    คืน (camp_name, base_min, base_max) หรือ None
+    """
+    raw = text.strip()
+    # รูปแบบมีราคากลางแบบช่วง: เปิด <ชื่อค่าย> <min>-<max>
+    m = re.match(r"^เปิด\s+(.+?)\s+(\d+)\s*[-/]\s*(\d+)$", raw)
+    if m:
+        camp_name = m.group(1).strip()
+        a, b = int(m.group(2)), int(m.group(3))
+        if a > b:
+            a, b = b, a
+        return (camp_name, a, b)
+    # รูปแบบราคาเดียว 3 หลัก: เปิด <ชื่อค่าย> 320
+    m = re.match(r"^เปิด\s+(.+?)\s+(\d{3})$", raw)
+    if m:
+        camp_name = m.group(1).strip()
+        price = int(m.group(2))
+        return (camp_name, price, price)
+    # รูปแบบไม่มีราคา: เปิด <ชื่อค่าย>
+    m = re.match(r"^เปิด\s+(.+)$", raw)
+    if m:
+        return (m.group(1).strip(), None, None)
+    return None
 
 
 def parse_change_camp_command(text):
@@ -6536,6 +6703,282 @@ def parse_rollback_result_command(text):
         return "confirm"
     if clean in {"ยกเลิกย้อนผล", "ยกเลิกย้อน", "cancelrollback"}:
         return "cancel"
+    return None
+
+
+def _camp_words(camp_name: str) -> list:
+    """แยกคำในชื่อค่ายเป็น list"""
+    return [w for w in re.split(r"\s+", (camp_name or "").strip()) if w]
+
+
+def find_camp_in_text(text: str) -> tuple:
+    """
+    หาชื่อค่ายในข้อความเล่น รองรับทุกรูปแบบ:
+      หน้า:   "แอ็ด ล 500"  / "เมฆเจริญ ชล500"
+      กลาง:   "ชล แอ็ด 500" / "ล นุเจริญ 500"
+      หลัง:   "ชล500 แอ็ด"  / "ล 500 เมฆ"
+
+    จับชื่อค่ายแบบ substring: prefix, suffix, และ substring ตรงกลาง ≥2 ตัว
+    ตรวจสอบว่า remaining parse เป็น offer ได้ก่อนจะ return เสมอ
+    """
+    raw = (text or "").strip()
+    open_camps = [
+        (st.get("camp_name"), base_no)
+        for base_no, st in ROUNDS.items()
+        if isinstance(st, dict) and st.get("opened") and st.get("camp_name")
+    ]
+    if not open_camps:
+        return (None, raw, None)
+
+    alias_pat = "|".join(re.escape(x) for x in ALL_PLAY_ALIASES)
+
+    def _play_parseable(t: str) -> bool:
+        c = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", t or "")
+        return bool(re.match(rf"^([+-]\d+)?({alias_pat})(\d+)$", c))
+
+    _THAI_CONSONANT_RE = re.compile(r"[\u0E01-\u0E2E\u0E30\u0E32\u0E33\u0E40-\u0E44]")
+    _THAI_DIACRITICS_RE = re.compile(r"[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]")
+
+    def _strip_dia(t: str) -> str:
+        return _THAI_DIACRITICS_RE.sub("", t or "")
+
+    def _play_parseable(t: str) -> bool:
+        c = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", t or "")
+        # แบบปกติ: ชล500 / +5ชล500
+        if re.match(rf"^([+-]\d+)?({alias_pat})(\d+)$", c):
+            return True
+        # แบบตัวเลขช่วง 3 หลัก: 280-290ล500 / 330/360ล500 / 330-360+5ล500
+        if re.match(rf"^(?:ตัว)?\d{{3}}[-/]\d{{3}}([+-]\d+)?({alias_pat})\d+(ชตย)?$", c):
+            return True
+        # แบบตัวเลขเดียว 3 หลัก: 400ล500 / 400+5ล500
+        if re.match(rf"^\d{{3}}([+-]\d+)?({alias_pat})\d+(ชตย)?$", c):
+            return True
+        # แบบเลข 2 ตัว: 30-70ล500 / 3-7ล500
+        if re.match(rf"^(?:ตัว)?\d{{1,2}}[-/]\d{{1,2}}({alias_pat})\d+(ชตย)?$", c):
+            return True
+        return False
+
+    def _build_tokens(camp_name: str) -> list:
+        """สร้าง token จาก substring ของชื่อค่าย หลังลบวรรณยุกต์
+        ใช้ minimum 1 ตัว เพราะหลังลบวรรณยุกต์ 'นุ' กลายเป็น 'น' (1 ตัว)
+        เรียงยาวก่อนเพื่อจับคำยาวสุด"""
+        tokens = set()
+        for word in _camp_words(camp_name):
+            stripped = _strip_dia(word)
+            n = len(stripped)
+            for start in range(n):
+                for end in range(start + 1, n + 1):
+                    tok = stripped[start:end]
+                    if _THAI_CONSONANT_RE.search(tok):
+                        tokens.add(tok)
+        return sorted(tokens, key=len, reverse=True)
+
+    # ลบวรรณยุกต์จาก raw text ก่อน match กับ token
+    raw_stripped = _strip_dia(raw)
+
+    # รวบ matches ที่เป็นไปได้ทั้งหมด (camp_name, rem, base_no)
+    # ถ้า token เดียวกัน match หลายค่าย → ambiguous → แจ้งให้ระบุชื่อให้ชัดขึ้น
+    all_matches = []  # [(camp_name, rem, base_no)]
+    seen_tokens = {}  # token → [(camp_name, rem, base_no)] เก็บทุก camp ที่ token นี้ match
+
+    for camp_name, base_no in open_camps:
+        for tok in _build_tokens(camp_name):
+            pat = re.escape(tok)
+            matched_rem = None
+
+            # 1) ชื่อค่ายนำหน้า (มีช่องว่าง)
+            m = re.match(rf"^{pat}\s+(.+)$", raw_stripped)
+            if m:
+                prefix_len = len(re.match(rf"^(\S+)\s+", raw_stripped).group(0)) if re.match(rf"^(\S+)\s+", raw_stripped) else 0
+                rem = raw[prefix_len:].strip() if prefix_len else m.group(1).strip()
+                if not rem:
+                    rem = m.group(1).strip()
+                if _play_parseable(rem):
+                    matched_rem = rem
+
+            # 1b) ชื่อค่ายนำหน้าติดกับ alias ไม่มีช่องว่าง เช่น ลูกรักถอย500
+            if matched_rem is None and len(tok) >= 2:
+                if raw_stripped.startswith(tok):
+                    rem_stripped = raw_stripped[len(tok):]
+                    if rem_stripped and _play_parseable(rem_stripped):
+                        # หา offset ใน raw text เดิมโดย map กลับจาก stripped
+                        _raw_offset = 0
+                        _stripped_count = 0
+                        for _ch in raw:
+                            if _stripped_count >= len(tok):
+                                break
+                            _raw_offset += 1
+                            if not _THAI_DIACRITICS_RE.match(_ch):
+                                _stripped_count += 1
+                        matched_rem = raw[_raw_offset:].strip()
+
+            if matched_rem is None:
+                # 2) ชื่อค่ายกลาง + ช่องว่าง + ตัวเลข
+                m = re.match(rf"^(.+?)\s+{pat}\s+(\d[\d,]*.*)$", raw_stripped)
+                if m:
+                    rem = (m.group(1) + " " + m.group(2)).strip()
+                    if _play_parseable(rem):
+                        matched_rem = rem
+
+            if matched_rem is None:
+                # 3) ชื่อค่ายกลางติดตัวเลข
+                m = re.match(rf"^(.+?)\s+{pat}(\d.*)$", raw_stripped)
+                if m:
+                    rem = (m.group(1) + m.group(2)).strip()
+                    if _play_parseable(rem):
+                        matched_rem = rem
+
+            if matched_rem is None:
+                # 4) ชื่อค่ายตามหลัง
+                m = re.match(rf"^(.+?\d+)\s+{pat}\s*$", raw_stripped)
+                if m:
+                    rem = m.group(1).strip()
+                    if _play_parseable(rem):
+                        matched_rem = rem
+
+            if matched_rem is not None:
+                entry = (camp_name, matched_rem, base_no)
+                # ถ้ายังไม่เคยเห็น camp นี้ ให้เพิ่ม
+                if not any(e[0] == camp_name for e in all_matches):
+                    all_matches.append(entry)
+                # บันทึก token → camps ที่ match
+                if tok not in seen_tokens:
+                    seen_tokens[tok] = []
+                if camp_name not in seen_tokens[tok]:
+                    seen_tokens[tok].append(camp_name)
+                break  # ได้ match แล้ว ข้ามไป camp ถัดไป
+
+    if not all_matches:
+        return (None, raw, None)
+
+    if len(all_matches) == 1:
+        return all_matches[0]
+
+    # หลายค่าย match — ตรวจว่า keyword ที่พิมไป (token) ทำให้ ambiguous ไหม
+    # ถ้า token ยาวที่สุดที่ match ตรงแค่ค่ายเดียว ให้ใช้ค่ายนั้น
+    # ถ้ายังคลุมเครือ → แจ้ง ambiguous
+    for tok, camps in sorted(seen_tokens.items(), key=lambda x: -len(x[0])):
+        if len(camps) == 1:
+            # token นี้ match ค่ายเดียว → ใช้ได้
+            for entry in all_matches:
+                if entry[0] == camps[0]:
+                    return entry
+
+    # ยังคลุมเครือ — หา keyword จาก raw ที่ผู้ใช้พิม (token ยาวที่สุดที่ match หลายค่าย)
+    _amb_tok = max(seen_tokens.keys(), key=len) if seen_tokens else "?"
+    _amb_camp_list = "\n".join(f"- {c}" for c in dict.fromkeys(
+        c for camps in seen_tokens.values() for c in camps
+    ))
+    # คืน signal พิเศษ ใช้ __ambiguous__ เป็น camp_name
+    return ("__ambiguous__", _amb_camp_list, _amb_tok)
+
+
+def select_round_state_for_camp(camp_name: str, base_no: str = None):
+    """เลือก STATE ที่ตรงกับค่ายที่ระบุ ถ้ามี base_no ให้ใช้ base_no ก่อน (แม่นยำที่สุด)"""
+    if not camp_name and not base_no:
+        return None
+    if base_no and base_no in ROUNDS:
+        st = ROUNDS[base_no]
+        if isinstance(st, dict) and st.get("opened"):
+            return st
+    if camp_name:
+        for _bn, st in ROUNDS.items():
+            if not isinstance(st, dict):
+                continue
+            if st.get("opened") and normalize_camp_key(st.get("camp_name")) == normalize_camp_key(camp_name):
+                return st
+    return None
+
+
+def find_camp_keyword_only(text: str) -> tuple:
+    """
+    จับชื่อค่ายจาก text โดยไม่ต้องตรวจว่า remaining เป็น offer ได้หรือเปล่า
+    ใช้สำหรับตรวจ ambiguous ก่อนที่ parse_offer จะทำงาน
+    คืน (camp_name, base_no) ถ้าจับได้ค่ายเดียว
+    คืน ("__ambiguous__", camp_list_str, keyword) ถ้าคลุมเครือ
+    คืน (None, None) ถ้าไม่พบชื่อค่ายในข้อความ
+    """
+    raw = (text or "").strip()
+    open_camps = [
+        (st.get("camp_name"), base_no)
+        for base_no, st in ROUNDS.items()
+        if isinstance(st, dict) and st.get("opened") and st.get("camp_name")
+    ]
+    if not open_camps:
+        return (None, None)
+
+    THAI_CONSONANT_RE = re.compile(r"[\u0E01-\u0E2E\u0E30\u0E32\u0E33\u0E40-\u0E44]")
+    THAI_DIACRITICS_RE = re.compile(r"[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]")
+
+    def _sd(t): return THAI_DIACRITICS_RE.sub("", t or "")
+
+    raw_stripped = _sd(raw)
+    raw_words = re.split(r"\s+", raw_stripped)
+
+    # สร้าง token map: token → [camp_names]
+    token_to_camps = {}
+    camp_tokens = {}
+
+    for camp_name, base_no in open_camps:
+        tokens = set()
+        for word in _camp_words(camp_name):
+            s = _sd(word)
+            n = len(s)
+            for i in range(n):
+                for j in range(i + 1, n + 1):
+                    tok = s[i:j]
+                    if THAI_CONSONANT_RE.search(tok):
+                        tokens.add(tok)
+        camp_tokens[(camp_name, base_no)] = tokens
+        for tok in tokens:
+            if tok not in token_to_camps:
+                token_to_camps[tok] = []
+            if camp_name not in token_to_camps[tok]:
+                token_to_camps[tok].append(camp_name)
+
+    # ตรวจว่า word ใดใน raw match กับ token ของค่ายไหนบ้าง
+    matched_camps = set()  # camp_name ที่ match
+    matched_tok = None
+
+    for word in raw_words:
+        if len(word) < 1:
+            continue
+        # หา camp ที่มี token == word นี้
+        hit_camps = [c for c in open_camps if word in camp_tokens.get(c, set())]
+        if hit_camps:
+            for c, bn in hit_camps:
+                matched_camps.add((c, bn))
+            if matched_tok is None or len(word) > len(matched_tok):
+                matched_tok = word
+
+    if not matched_camps:
+        return (None, None)
+
+    if len(matched_camps) == 1:
+        camp_name, base_no = next(iter(matched_camps))
+        return (camp_name, base_no)
+
+    # หลายค่าย — ambiguous
+    camp_list = "\n".join(f"- {c}" for c, _ in matched_camps)
+    return ("__ambiguous__", camp_list, matched_tok or "?")
+
+
+
+    """เลือก STATE ที่ตรงกับค่ายที่ระบุ ถ้ามี base_no ให้ใช้ base_no ก่อน"""
+    if not camp_name and not base_no:
+        return None
+    # ถ้ามี base_no ให้ค้นตรงๆ เลย (แม่นยำที่สุด)
+    if base_no and base_no in ROUNDS:
+        st = ROUNDS[base_no]
+        if isinstance(st, dict) and st.get("opened"):
+            return st
+    # fallback ค้นด้วยชื่อ
+    if camp_name:
+        for _bn, st in ROUNDS.items():
+            if not isinstance(st, dict):
+                continue
+            if st.get("opened") and normalize_camp_key(st.get("camp_name")) == normalize_camp_key(camp_name):
+                return st
     return None
 
 
@@ -6898,10 +7341,11 @@ def is_clear_round_backups_command(text: str) -> bool:
 
 def parse_credit_command(text):
     """
-    $+ 1 1000
-    $- 1 1000
+    $+ 1 1000 / $- 1 1000
+    +1 100 / -1 100 / + 1 100 / - 1 100
     """
-    m = re.match(r"^\$(\+|-)\s+(\d+)\s+(\d+)$", text.strip())
+    # รองรับทั้งแบบมี $ นำหน้า และแบบไม่มี $
+    m = re.match(r"^(?:\$)?(\+|-)\s*(\d+)\s+(\d+)$", text.strip())
     if not m:
         return None
 
@@ -6926,6 +7370,7 @@ def parse_confirm_command(text):
         "ต", "ติด", "ครับ", "เค", "จ้า", "ติดจ้า",
         "ตต", "ตด", "ตอด", "ตอก", "จ", "ติดครับ", "ติดด", "ติก",
         "ตอน","ตาม","แตก","ต้อง","ตัวเอง","ตืด","ตตต","ตื่น","ตัด",
+        "ตู้", "ต้น","ชต","จึก","ตึก","ตั้ง",
     }
 
     if clean in confirm_keywords:
@@ -7391,6 +7836,250 @@ def cancel_success_flex(match):
                     "color": "#B3B3B3",
                     "size": "xs",
                     "wrap": True,
+                },
+            ],
+        },
+    }
+
+
+def camp_cancel_notify_flex(match, camp_name: str, refund_amount: int):
+    """FLEX แจ้งยกเลิกค่าย + คืนเครดิต ส่งไปยัง DM ของแต่ละคนในบิล"""
+    play_text = format_match_play_text(match)
+    price_label = "ราคาเล่น" if match.get("is_custom_price") else "ราคาช่าง"
+    price_text = format_match_price_text_for_flex(match)
+    order_no = match.get("order_no", "-")
+
+    return {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#F59E0B",
+            "paddingAll": "14px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "📋 ยกเลิกค่ายนี้",
+                    "weight": "bold",
+                    "size": "md",
+                    "color": "#FFFFFF",
+                },
+            ],
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "16px",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "คืนเครดิต",
+                    "size": "sm",
+                    "align": "center",
+                    "color": "#999999",
+                },
+                {
+                    "type": "text",
+                    "text": f"{refund_amount:,} บาท",
+                    "size": "xxl",
+                    "weight": "bold",
+                    "align": "center",
+                    "color": "#F59E0B",
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "contents": [
+                        {"type": "text", "text": camp_name, "size": "sm", "color": "#6B7280", "wrap": True, "flex": 4},
+                        {"type": "text", "text": f"Order #{order_no}", "size": "sm", "weight": "bold", "align": "end", "color": "#F59E0B", "flex": 2},
+                    ],
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "margin": "md",
+                    "contents": [
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "flex": 5,
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": play_text or "-",
+                                    "size": "sm",
+                                    "weight": "bold",
+                                    "wrap": True,
+                                    "color": "#111111",
+                                },
+                                {
+                                    "type": "text",
+                                    "text": f"{price_label}: {price_text or '-'}",
+                                    "size": "xs",
+                                    "color": "#6B7280",
+                                    "wrap": True,
+                                    "margin": "xs",
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "แอดมินยกเลิกค่ายนี้ เครดิตถูกคืนให้คุณเรียบร้อยแล้ว",
+                                    "size": "xs",
+                                    "color": "#EF4444",
+                                    "wrap": True,
+                                    "margin": "xs",
+                                },
+                            ],
+                        },
+                        {
+                            "type": "text",
+                            "text": money_text(refund_amount),
+                            "size": "sm",
+                            "weight": "bold",
+                            "align": "end",
+                            "color": "#F59E0B",
+                            "flex": 2,
+                        },
+                    ],
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "text",
+                    "text": "เครดิตคืนให้อัตโนมัติ ไม่ต้องดำเนินการใดเพิ่มเติม",
+                    "size": "xs",
+                    "align": "center",
+                    "color": "#B3B3B3",
+                    "wrap": True,
+                    "margin": "md",
+                },
+            ],
+        },
+    }
+
+
+def camp_cancel_multi_flex(items: list, camp_name: str):
+    """FLEX รวมหลายรายการยกเลิกค่ายใน bubble เดียว ต่อลงมาเรื่อยๆ"""
+    total_refund = sum(amt for _, amt in items)
+    row_contents = []
+
+    for match, refund_amount in items:
+        play_text = format_match_play_text(match)
+        price_label = "ราคาเล่น" if match.get("is_custom_price") else "ราคาช่าง"
+        price_text = format_match_price_text_for_flex(match)
+        order_no = match.get("order_no", "-")
+
+        row_contents.extend([
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "margin": "md",
+                "contents": [
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "flex": 5,
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": play_text or "-",
+                                "size": "sm",
+                                "weight": "bold",
+                                "wrap": True,
+                                "color": "#111111",
+                            },
+                            {
+                                "type": "text",
+                                "text": f"{price_label}: {price_text or '-'}",
+                                "size": "xs",
+                                "color": "#6B7280",
+                                "wrap": True,
+                                "margin": "xs",
+                            },
+                            {
+                                "type": "text",
+                                "text": f"Order #{order_no}",
+                                "size": "xs",
+                                "color": "#EF4444",
+                                "wrap": True,
+                                "margin": "xs",
+                            },
+                        ],
+                    },
+                    {
+                        "type": "text",
+                        "text": money_text(refund_amount),
+                        "size": "sm",
+                        "weight": "bold",
+                        "align": "end",
+                        "color": "#F59E0B",
+                        "flex": 2,
+                    },
+                ],
+            },
+            {"type": "separator", "margin": "md"},
+        ])
+
+    return {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#F59E0B",
+            "paddingAll": "14px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "📋 ยกเลิกค่ายนี้",
+                    "weight": "bold",
+                    "size": "md",
+                    "color": "#FFFFFF",
+                },
+            ],
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "16px",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "คืนเครดิตรวม",
+                    "size": "sm",
+                    "align": "center",
+                    "color": "#999999",
+                },
+                {
+                    "type": "text",
+                    "text": f"{total_refund:,} บาท",
+                    "size": "xxl",
+                    "weight": "bold",
+                    "align": "center",
+                    "color": "#F59E0B",
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "contents": [
+                        {"type": "text", "text": camp_name, "size": "sm", "color": "#6B7280", "wrap": True, "flex": 4},
+                        {"type": "text", "text": f"{len(items)} รายการ", "size": "sm", "weight": "bold", "align": "end", "color": "#F59E0B", "flex": 2},
+                    ],
+                },
+                {"type": "separator", "margin": "md"},
+                *row_contents,
+                {
+                    "type": "text",
+                    "text": "เครดิตคืนให้อัตโนมัติ ไม่ต้องดำเนินการใดเพิ่มเติม",
+                    "size": "xs",
+                    "align": "center",
+                    "color": "#B3B3B3",
+                    "wrap": True,
+                    "margin": "md",
                 },
             ],
         },
@@ -8283,7 +8972,6 @@ def request_clear_round_confirm(clear_by: str = "-", chat_id: str = None):
         "⚠️ ยืนยันการเคลียร์รอบ\n\n"
         "จะเคลียร์รอบนี้ ใช่หรือไม่?\n\n"
         f"ค่าย: {camp_name}\n"
-        f"ห้องรอบ: {round_chat_id}\n\n"
         f"บิลที่จะคืนเครดิต: {preview['refunded_matches']:,} รายการ\n"
         f"เครดิตที่จะคืนรวม: {preview['refunded_credit_total']:,} เครดิต\n"
         f"โพสต์ที่จะยกเลิก: {preview['cancelled_posts']:,} รายการ\n"
@@ -8422,7 +9110,6 @@ def clear_current_round_and_refund(clear_by: str = "-"):
     return (
         "✅ CR เคลียร์รอบเรียบร้อย\n\n"
         f"ค่ายที่เคลียร์: {old_camp_name}\n"
-        f"ห้องรอบเดิม: {old_chat_id}\n\n"
         f"คืนบิลแล้ว: {refunded_matches:,} รายการ\n"
         f"คืนเครดิตรวม: {refunded_credit_total:,} เครดิต\n"
         f"ยกเลิกโพสต์เดิม: {cancelled_posts:,} รายการ\n"
@@ -8946,10 +9633,11 @@ def change_camp_and_refund_wrong_round(new_camp_name: str, chat_id: str = None):
     )
 
 
-def create_post(event, offer):
+def create_post(event, offer, round_state=None):
     """
     สำเร็จ = return None เพื่อให้บอทเงียบ
     error = return text เพื่อแจ้งปัญหา
+    round_state: ถ้าระบุจะใช้ state ของค่ายนั้น (กรณีเล่นหลายค่ายพร้อมกัน)
     """
     user_id = event.source.user_id
     user = ensure_user_from_event(event)
@@ -8957,13 +9645,16 @@ def create_post(event, offer):
     if not is_front_chat(event):
         return None
 
+    # ใช้ state ที่ระบุ หรือ STATE ปัจจุบัน
+    st = round_state if round_state is not None else STATE
+
     if not is_current_round_chat(event):
         return "รายการนี้ต้องเล่นในกลุ่มหน้าบ้านที่เปิดรอบเท่านั้น"
 
-    if not STATE["opened"]:
-        return "ยังไม่เปิดรอบ จึงไม่รับโพสต์"
+    if not st["opened"]:
+        return None
 
-    if STATE.get("settled"):
+    if st.get("settled"):
         return "รอบนี้แจ้งผลแล้ว ไม่รับโพสต์เพิ่ม"
 
     if user_credit_amount(user) < offer["amount"]:
@@ -8979,12 +9670,16 @@ def create_post(event, offer):
     if not post_id:
         return "ระบบไม่พบ message id ของโพสต์นี้"
 
+    # กัน duplicate post จาก LINE retry ที่หลุดผ่าน mark_message_processed
+    if post_id in POSTS:
+        return None
+
     POSTS[post_id] = {
         "post_id": post_id,
-        "round_id": STATE["round_id"],
-        "base_no": STATE.get("base_no"),
-        "camp_name": STATE.get("camp_name"),
-        "chat_id": STATE.get("chat_id"),
+        "round_id": st["round_id"],
+        "base_no": st.get("base_no"),
+        "camp_name": st.get("camp_name"),
+        "chat_id": st.get("chat_id"),
         "maker_id": user_id,
         "plus": offer["plus"],
         "amount": offer["amount"],
@@ -9007,7 +9702,6 @@ def create_post(event, offer):
     }
 
     # สำรองทันทีหลังรับโพสต์แผลสำเร็จ
-    # กันเคสบอทรีสตาร์ท/อัปเดตโค้ดระหว่างที่ยังไม่ทันจับคู่
     save_round_backup_db(reason="post_created")
 
     # เงียบเมื่อรับโพสต์สำเร็จ
@@ -9052,23 +9746,24 @@ def is_reply_to_known_play_message(reply_message_id):
     """
     ใช้เฉพาะโหมดเงียบ:
     ตรวจว่าข้อความที่ถูก reply เป็นข้อความใน flow แผลเล่นหรือไม่
-    - โพสต์แผลต้นทาง เช่น ชล500 / ชถ200
-    - ข้อความ ต/ติด ของคนที่มาติด ซึ่งรอเจ้าของโพสต์ยืนยัน
+    รองรับหลายค่ายที่เปิดพร้อมกัน
     """
     if not reply_message_id:
         return False
 
+    _active_ids = _get_active_round_ids()
+
     if reply_message_id in POSTS:
         post = POSTS.get(reply_message_id) or {}
-        return post.get("round_id") == STATE.get("round_id")
+        return post.get("round_id") in _active_ids
 
     pending_post, pending_taker = find_pending_taker_by_reply_message_id(reply_message_id)
     if pending_post and pending_taker:
-        return pending_post.get("round_id") == STATE.get("round_id")
+        return pending_post.get("round_id") in _active_ids
 
     counter_post, counter_taker = find_counter_pending_by_reply_message_id(reply_message_id)
     if counter_post and counter_taker:
-        return counter_post.get("round_id") == STATE.get("round_id")
+        return counter_post.get("round_id") in _active_ids
 
     return False
 
@@ -9100,7 +9795,7 @@ def invalid_play_reply_warning(event, text: str):
 
     # กรณีลูกค้า reply โพสต์แผลต้นทาง แต่คำไม่ใช่ ต/ติด
     post = POSTS.get(quoted_message_id)
-    if post and post.get("round_id") == STATE.get("round_id"):
+    if post and post.get("round_id") in _get_active_round_ids():
         if user_id == post.get("maker_id"):
             return (
                 "❌ ยังไม่ใช่การยืนยันจับคู่ค่ะ\n\n"
@@ -9118,7 +9813,7 @@ def invalid_play_reply_warning(event, text: str):
 
     # กรณีเจ้าของโพสต์ reply ข้อความ ต/ติด ของลูกค้า แต่พิมพ์คำยืนยันผิด
     pending_post, pending_taker = find_pending_taker_by_reply_message_id(quoted_message_id)
-    if pending_post and pending_taker and pending_post.get("round_id") == STATE.get("round_id"):
+    if pending_post and pending_taker and pending_post.get("round_id") in _get_active_round_ids():
         if user_id == pending_post.get("maker_id"):
             return (
                 "❌ คำยืนยันจับคู่ไม่ถูกต้องค่ะ\n\n"
@@ -9133,7 +9828,7 @@ def invalid_play_reply_warning(event, text: str):
 
     # กรณีคนที่มาติดต้อง reply ข้อความที่เจ้าของโพสต์เสนอแก้ยอด เช่น ต100
     counter_post, counter_taker = find_counter_pending_by_reply_message_id(quoted_message_id)
-    if counter_post and counter_taker and counter_post.get("round_id") == STATE.get("round_id"):
+    if counter_post and counter_taker and counter_post.get("round_id") in _get_active_round_ids():
         if user_id == counter_taker.get("taker_id"):
             return (
                 "❌ คำยืนยันยอดที่เสนอไม่ถูกต้องค่ะ\n\n"
@@ -9144,6 +9839,24 @@ def invalid_play_reply_warning(event, text: str):
         return "รายการนี้รอคนที่มาติดยืนยันยอดที่เจ้าของโพสต์เสนอค่ะ"
 
     return None
+
+
+def _get_open_round_ids() -> set:
+    """คืน set ของ round_id ทั้งหมดที่ยังเปิดอยู่ (opened=True, settled=False)"""
+    return {
+        st.get("round_id")
+        for st in ROUNDS.values()
+        if isinstance(st, dict) and st.get("opened") and st.get("round_id") and not st.get("settled")
+    }
+
+
+def _get_active_round_ids() -> set:
+    """คืน set ของ round_id ที่ยังไม่ settled (ทั้งเปิดและปิดรอผล)"""
+    return {
+        st.get("round_id")
+        for st in ROUNDS.values()
+        if isinstance(st, dict) and st.get("round_id") and not st.get("settled")
+    }
 
 
 def handle_confirm(event, quoted_message_id, requested_amount=None):
@@ -9167,24 +9880,32 @@ def handle_confirm(event, quoted_message_id, requested_amount=None):
     if not is_current_round_chat(event):
         return "รายการนี้ต้องเล่นในกลุ่มหน้าบ้านที่เปิดรอบเท่านั้น"
 
-    if not STATE["opened"]:
-        return "ปิดอยู่ หรือยังไม่เปิดรอบ จึงไม่สามารถติดได้"
+    _active_round_ids = _get_active_round_ids()
 
-    if STATE.get("settled"):
-        return "รอบนี้แจ้งผลแล้ว ไม่สามารถติดเพิ่มได้"
+    # ถ้าไม่มีรอบ active เลย ให้เงียบ
+    if not _active_round_ids:
+        return None
 
     if not quoted_message_id:
-        # กลุ่มลูกค้าเยอะ: ถ้าพิมพ์ ต/ติด เฉย ๆ โดยไม่ได้ reply รายการ ให้บอทเงียบ
         if QUIET_GROUP_MODE:
             return None
         return "ต้องตอบกลับข้อความที่ต้องการติดเท่านั้น"
+
+    # คำนวณ _open_round_ids เผื่อใช้ตรวจสอบบางจุด
+    _open_round_ids = _get_open_round_ids()
 
     # B ยืนยันยอดที่ A เสนอแก้กลับมา เช่น
     # A โพสต์ ชล1000 -> B ติด -> A reply ว่า ต100 -> B reply ข้อความ ต100 ว่า ติด
     counter_post, counter_taker = find_counter_pending_by_reply_message_id(quoted_message_id)
     if counter_post and counter_taker:
-        if counter_post.get("round_id") != STATE.get("round_id"):
+        if counter_post.get("round_id") not in _active_round_ids:
             return "รายการนี้ไม่ใช่รอบปัจจุบัน"
+
+        # ถ้าค่ายปิดรอบแล้ว ไม่อนุญาตให้ยืนยัน counter pending
+        _counter_round_state = get_state_by_round_id(counter_post.get("round_id"))
+        if _counter_round_state and not _counter_round_state.get("opened"):
+            _camp = _counter_round_state.get("camp_name") or "ค่ายนี้"
+            return f"❌ {_camp} ปิดรอบแล้ว ไม่สามารถยืนยันรายการได้ค่ะ"
 
         if user_id != counter_taker.get("taker_id"):
             return "รายการนี้รอคนที่มาติดยืนยันยอดที่เจ้าของโพสต์เสนอ"
@@ -9229,8 +9950,14 @@ def handle_confirm(event, quoted_message_id, requested_amount=None):
     # ถ้าคนอื่น เช่น นาย C ไปตอบข้อความติดของนาย B ให้เตือนทันที กันติดผิดรายการ
     pending_post, pending_taker = find_pending_taker_by_reply_message_id(quoted_message_id)
     if pending_post and pending_taker:
-        if pending_post.get("round_id") != STATE.get("round_id"):
+        if pending_post.get("round_id") not in _active_round_ids:
             return "รายการนี้ไม่ใช่รอบปัจจุบัน"
+
+        # ถ้าค่ายปิดรอบแล้ว ไม่อนุญาตให้ A ยืนยัน pending
+        _pending_round_state = get_state_by_round_id(pending_post.get("round_id"))
+        if _pending_round_state and not _pending_round_state.get("opened"):
+            _camp = _pending_round_state.get("camp_name") or "ค่ายนี้"
+            return f"❌ {_camp} ปิดรอบแล้ว ไม่สามารถยืนยันรายการได้ค่ะ"
 
         if user_id != pending_post["maker_id"]:
             return "ตอบผิดกรุณาเช็คก่อนติด เพื่อผลประโยชน์ของคุณพี่นะคะ"
@@ -9275,96 +10002,107 @@ def handle_confirm(event, quoted_message_id, requested_amount=None):
         return create_match_from_pending(pending_post, pending_taker)
 
     # B ตอบกลับโพสต์ต้นทางของ A
-    post = POSTS.get(quoted_message_id)
-    if not post:
-        # ถ้า quote ข้อความทั่วไปในกลุ่มแล้วพิมพ์ ต/ติด ให้ถือว่าไม่ใช่แผลเล่นและเงียบ
-        if QUIET_GROUP_MODE and QUIET_IGNORE_WRONG_REPLY:
+    # ใช้ POSTS_LOCK ครอบทั้งส่วนการอ่าน/เขียน POSTS เพื่อป้องกัน race condition
+    with POSTS_LOCK:
+        post = POSTS.get(quoted_message_id)
+        if not post:
+            # ถ้า quote ข้อความทั่วไปในกลุ่มแล้วพิมพ์ ต/ติด ให้ถือว่าไม่ใช่แผลเล่นและเงียบ
+            if QUIET_GROUP_MODE and QUIET_IGNORE_WRONG_REPLY:
+                return None
+            return "ไม่พบโพสต์ต้นทาง หรือโพสต์นี้ไม่ใช่รายการที่ระบบไว้"
+
+        if post.get("round_id") not in _active_round_ids:
+            # ลองตรวจจาก state โดยตรง เผื่อ _active_round_ids ไม่ครบ
+            post_state = get_state_by_round_id(post.get("round_id"))
+            if not post_state or post_state.get("settled"):
+                return "โพสต์นี้ไม่ใช่รอบปัจจุบัน"
+
+        # ถ้าค่ายปิดรอบแล้ว (opened=False) ไม่รับ taker ใหม่
+        _post_round_state = get_state_by_round_id(post.get("round_id"))
+        if _post_round_state and not _post_round_state.get("opened"):
+            _closed_camp_name = _post_round_state.get("camp_name") or "ค่ายนี้"
+            return f"❌ {_closed_camp_name} ปิดรอบแล้ว ไม่รับรายการใหม่ค่ะ"
+
+        # โพสต์ 1 โพสต์ใช้เป็น "ราคาแม่แบบ" ได้เรื่อย ๆ
+        # หลังจับคู่สำเร็จแล้ว ห้ามปิดโพสต์อัตโนมัติ เพราะ C/D/E ต้องมาติดโพสต์เดิมต่อได้
+        post_status = post.get("status", "open")
+        if post_status not in ["open", "closed"]:
+            return "โพสต์นี้ไม่เปิดรับแล้ว"
+
+        if post_status == "closed":
+            # รองรับโพสต์เก่าที่เคยถูกโค้ดเดิมปิดเพราะ remaining_amount = 0
+            post["status"] = "open"
+
+        if user_id == post["maker_id"]:
+            # เจ้าองโพสต์ต้องไป reply ข้อความ ติด ของคนที่มาติดเท่านั้น
+            # ถ้า reply โพสต์ตัวเองผิดตำแหน่ง ให้เงียบเพื่อลดข้อความรกกลุ่ม
+            if QUIET_GROUP_MODE and QUIET_IGNORE_WRONG_REPLY:
+                return None
+            return "เจ้าองโพสต์ต้องยืนยันยืนยันโดยตอบกลับข้อความ ติด ของคนที่มาติด"
+
+        post_amount = int(post.get("amount", 0) or 0)
+        if post_amount <= 0:
+            return "โพสต์นี้ยอดไม่ถูกต้อง ไม่สามารถติดได้"
+
+        take_amount = int(requested_amount) if requested_amount is not None else post_amount
+
+        if take_amount <= 0:
+            return "ยอดติดต้องมากกว่า 0"
+
+        if take_amount > post_amount:
+            return (
+                f"ติดไม่สำเร็จ\n"
+                f"ยอดที่ต้องการติด: {take_amount:,}\n"
+                f"ยอดที่โพสต์ไว้: {post_amount:,}\n"
+                f"ให้พิมใหม่ เช่น ต{post_amount}"
+            )
+
+        # เช็กเรดิตคนมาติดทันที่ตั้งแต่ข้อความ ต/ติด
+        # เดิม: ถ้าพิมพ์ "ติด" เฉย ๆ ระบบจะสร้าง pending ก่อน แล้วค่อยไปเช็กตอนเจ้าของโพสต์ยืนยัน
+        # ใหม่: เรดิตต้องพอเท่ากันยอดที่จะติดก่อน จึงค่อยไปสร้าง pending เพื่อกันคนเรดิต 0 มาค้างรายการ
+        current_credit = user_credit_amount(user)
+        if current_credit < take_amount:
+            return insufficient_credit_warning(
+                user,
+                take_amount,
+                play_text=format_post_play_text(post),
+                is_chty=bool(post.get("only_when_no_price")),
+                action="ติดรายการ",
+            )
+
+        # ถ้าคนเดิมติดโพสต์เดิมซ้ำก่อนเจ้าของโพสต์ยืนยัน
+        # ห้ามสร้าง pending ซ้ำ แต่ต้องอัปเดต message id เป็นข้อความล่าสุด
+        # เพื่อใหเจ้าของโพสต์ Reply ข้อความ "ติด" ล่าสุดแล้วยืนยันได้จริง
+        existing_pending = None
+        for t in post.get("takers", []):
+            if t.get("taker_id") == user_id and is_waiting_status(t.get("status")):
+                existing_pending = t
+                break
+
+        if existing_pending:
+            existing_pending["taker_reply_message_id"] = current_msg_id
+            existing_pending["amount"] = take_amount
+            existing_pending["status"] = "pending"
+            # ถ้าเคยอยู่ในขั้น counter_pending แล้ว B กลับไป reply โพสต์ต้นทางใหม่ ให้เริ่มรอยื่นยันใหม่
+            existing_pending.pop("counter_amount", None)
+            existing_pending.pop("counter_message_id", None)
+            existing_pending.pop("counter_by", None)
+            existing_pending.pop("last_counter_text", None)
+            existing_pending["updated_at"] = now_text()
+            existing_pending["last_confirm_text"] = getattr(event.message, "text", "")
+            save_round_backup_db(reason="pending_updated")
+            # เงียบ: ถือว่าอัปเดตรายการรอยื่นยันเรียบร้อยแล้ว
             return None
-        return "ไม่พบโพสต์ต้นทาง หรือโพสต์นี้ไม่ใช่รายการที่ระบบรับไว้"
 
-    if post.get("round_id") != STATE.get("round_id"):
-        return "โพสต์นี้ไม่ใช่รอบปัจจุบัน"
-
-    # โพสต์ 1 โพสต์ใช้เป็น "ราคาแม่แบบ" ได้เรื่อย ๆ
-    # หลังจับคู่สำเร็จแล้ว ห้ามปิดโพสต์อัตโนมัติ เพราะ C/D/E ต้องมาติดโพสต์เดิมต่อได้
-    post_status = post.get("status", "open")
-    if post_status not in ["open", "closed"]:
-        return "โพสต์นี้ไม่เปิดรับแล้ว"
-
-    if post_status == "closed":
-        # รองรับโพสต์เก่าที่เคยถูกโค้ดเดิมปิดเพราะ remaining_amount = 0
-        post["status"] = "open"
-
-    if user_id == post["maker_id"]:
-        # เจ้าของโพสต์ต้องไป reply ข้อความ ติด ของคนที่มาติดเท่านั้น
-        # ถ้า reply โพสต์ตัวเองผิดตำแหน่ง ให้เงียบเพื่อลดข้อความรกกลุ่ม
-        if QUIET_GROUP_MODE and QUIET_IGNORE_WRONG_REPLY:
-            return None
-        return "เจ้าของโพสต์ต้องยืนยันโดยตอบกลับข้อความ ติด ของคนที่มาติด"
-
-    post_amount = int(post.get("amount", 0) or 0)
-    if post_amount <= 0:
-        return "โพสต์นี้ยอดไม่ถูกต้อง ไม่สามารถติดได้"
-
-    take_amount = int(requested_amount) if requested_amount is not None else post_amount
-
-    if take_amount <= 0:
-        return "ยอดติดต้องมากกว่า 0"
-
-    if take_amount > post_amount:
-        return (
-            f"ติดไม่สำเร็จ\n"
-            f"ยอดที่ต้องการติด: {take_amount:,}\n"
-            f"ยอดที่โพสต์ไว้: {post_amount:,}\n"
-            f"ให้พิมพ์ใหม่ เช่น ต{post_amount}"
-        )
-
-    # เช็กเครดิตคนมาติดทันทีตั้งแต่ข้อความ ต/ติด
-    # เดิม: ถ้าพิมพ์ "ติด" เฉย ๆ ระบบจะสร้าง pending ก่อน แล้วค่อยไปเช็กตอนเจ้าของโพสต์ยืนยัน
-    # ใหม่: เครดิตต้องพอเท่ากับยอดที่จะติดก่อน จึงค่อยสร้าง pending เพื่อกันคนเครดิต 0 มาค้างรายการ
-    current_credit = user_credit_amount(user)
-    if current_credit < take_amount:
-        return insufficient_credit_warning(
-            user,
-            take_amount,
-            play_text=format_post_play_text(post),
-            is_chty=bool(post.get("only_when_no_price")),
-            action="ติดรายการ",
-        )
-
-    # ถ้าคนเดิมติดโพสต์เดิมซ้ำก่อนเจ้าของโพสต์ยืนยัน
-    # ห้ามสร้าง pending ซ้ำ แต่ต้องอัปเดต message id เป็นข้อความล่าสุด
-    # เพื่อให้เจ้าของโพสต์ Reply ข้อความ "ติด" ล่าสุดแล้วยืนยันได้จริง
-    existing_pending = None
-    for t in post.get("takers", []):
-        if t.get("taker_id") == user_id and is_waiting_status(t.get("status")):
-            existing_pending = t
-            break
-
-    if existing_pending:
-        existing_pending["taker_reply_message_id"] = current_msg_id
-        existing_pending["amount"] = take_amount
-        existing_pending["status"] = "pending"
-        # ถ้าเคยอยู่ในขั้น counter_pending แล้ว B กลับไป reply โพสต์ต้นทางใหม่ ให้เริ่มรอยืนยันใหม่
-        existing_pending.pop("counter_amount", None)
-        existing_pending.pop("counter_message_id", None)
-        existing_pending.pop("counter_by", None)
-        existing_pending.pop("last_counter_text", None)
-        existing_pending["updated_at"] = now_text()
-        existing_pending["last_confirm_text"] = getattr(event.message, "text", "")
-        save_round_backup_db(reason="pending_updated")
-        # เงียบ: ถือว่าอัปเดตรายการรอยืนยันเรียบร้อยแล้ว
-        return None
-
-    post["takers"].append({
-        "taker_id": user_id,
-        "taker_reply_message_id": current_msg_id,
-        "amount": take_amount,
-        "status": "pending",
-        "created_at": now_text(),
-        "last_confirm_text": getattr(event.message, "text", ""),
-    })
-    save_round_backup_db(reason="pending_created")
+        post["takers"].append({
+            "taker_id": user_id,
+            "taker_reply_message_id": current_msg_id,
+            "amount": take_amount,
+            "status": "pending",
+            "created_at": now_text(),
+            "last_confirm_text": getattr(event.message, "text", ""),
+        })
+        save_round_backup_db(reason="pending_created")
 
     # เงียบเมื่อรับติดสำเร็จ
     return None
@@ -9374,14 +10112,21 @@ def create_match_from_pending(post, taker_entry):
     """
     สำเร็จ = ส่ง Flex แล้ว return None เพื่อให้บอทไม่ตอบในกลุ่ม
     error = return text
+    ใช้ MATCHES_LOCK และ USERS_LOCK เพื่อป้องกัน race condition
     """
-    if taker_entry.get("status") != "pending":
-        return "รายการนี้ถูกดำเนินการไปแล้ว"
+    # Double-check ใน STATE_LOCK กัน 2 threads ผ่านพร้อมกัน (taker confirm ซ้ำ)
+    # ต้อง check และ mark "matched" ภายใน lock เดียวกันเพื่อกัน race condition
+    with STATE_LOCK:
+        if taker_entry.get("status") != "pending":
+            return "รายการนี้ถูกดำเนินการไปแล้ว"
+        # mark ทันทีใน lock กัน thread อื่นผ่านเงื่อนไขนี้พร้อมกัน
+        taker_entry["status"] = "matching"
 
     # โพสต์เดิมต้องติดซ้ำได้เรื่อย ๆ แม้ก่อนหน้านี้จะจับคู่สำเร็จไปแล้ว
     # status closed จากโค้ดเดิมถือเป็นสถานะเก่าที่เกิดจากยอดเต็ม ไม่ใช่การปิดรับจริง
     post_status = post.get("status", "open")
     if post_status not in ["open", "closed"]:
+        taker_entry["status"] = "pending"  # rollback
         return "โพสต์นี้ไม่เปิดรับแล้ว"
 
     if post_status == "closed":
@@ -9412,110 +10157,101 @@ def create_match_from_pending(post, taker_entry):
             f"ยอดที่โพสต์ไว้: {post_amount:,}"
         )
 
-    if user_credit_amount(maker) < amount:
-        return insufficient_credit_warning(
-            maker,
-            amount,
-            play_text=format_post_play_text(post),
-            is_chty=bool(post.get("only_when_no_price")),
-            action="ยืนยันจับคู่",
-        )
+    with USERS_LOCK:
+        if user_credit_amount(maker) < amount:
+            return insufficient_credit_warning(
+                maker,
+                amount,
+                play_text=format_post_play_text(post),
+                is_chty=bool(post.get("only_when_no_price")),
+                action="ยืนยันจับคู่",
+            )
 
-    if user_credit_amount(taker) < amount:
-        taker_entry["status"] = "rejected_credit"
-        taker_entry["rejected_at"] = now_text()
-        taker_entry["reject_reason"] = "taker_insufficient_credit_before_match"
-        return insufficient_credit_warning(
-            taker,
-            amount,
-            play_text=format_post_play_text(post),
-            is_chty=bool(post.get("only_when_no_price")),
-            action="ยืนยันจับคู่",
-        )
+        if user_credit_amount(taker) < amount:
+            taker_entry["status"] = "rejected_credit"
+            taker_entry["rejected_at"] = now_text()
+            taker_entry["reject_reason"] = "taker_insufficient_credit_before_match"
+            return insufficient_credit_warning(
+                taker,
+                amount,
+                play_text=format_post_play_text(post),
+                is_chty=bool(post.get("only_when_no_price")),
+                action="ยืนยันจับคู่",
+            )
 
-    # ล็อกเครดิตทั้งสองฝั่งก่อนรอแจ้งผล
-    maker["credit"] = user_credit_amount(maker) - amount
-    taker["credit"] = user_credit_amount(taker) - amount
-    save_user_db()
+        # ล็อกเรดิตทังสองฝั่งก่อนรอแจ้งผล
+        maker["credit"] = user_credit_amount(maker) - amount
+        taker["credit"] = user_credit_amount(taker) - amount
+        save_user_db()
 
-    match_id = str(uuid.uuid4())
-    order_no = get_next_order_no()
+    with MATCHES_LOCK:
+        match_id = str(uuid.uuid4())
+        order_no = get_next_order_no()
 
-    match = {
-        "match_id": match_id,
-        "round_id": post["round_id"],
-        "base_no": post.get("base_no") or STATE.get("base_no"),
-        "camp_name": post.get("camp_name") or STATE.get("camp_name"),
-        "chat_id": post.get("chat_id") or STATE.get("chat_id"),
-        "order_no": order_no,
-        "post_id": post["post_id"],
-        "posted_amount": int(post.get("amount", amount) or amount),
-        "maker_id": post["maker_id"],
-        "taker_id": taker_entry["taker_id"],
-        # เก็บ snapshot ชื่อ/เลขสมาชิก ณ ตอนจับคู่ เพื่อให้ดูย้อนหลังได้ว่ารอบนี้ใครติดกับใคร
-        # แม้ภายหลังผู้เล่นเปลี่ยนชื่อ LINE รายงานรอบนี้ยังมีข้อมูลเดิมอ้างอิงได้
-        "maker_name": maker.get("line_name") or maker.get("name") or fallback_name(post["maker_id"]),
-        "taker_name": taker.get("line_name") or taker.get("name") or fallback_name(taker_entry["taker_id"]),
-        "maker_member_no": maker.get("member_no"),
-        "taker_member_no": taker.get("member_no"),
-        "maker_side": post["maker_side"],
-        "raw_alias": post.get("raw_alias", ""),
-        "price_adjust_target": post.get("price_adjust_target"),
-        "price_adjust_min": post.get("price_adjust_min"),
-        "price_adjust_max": post.get("price_adjust_max"),
-        "custom_price_min": post.get("custom_price_min"),
-        "custom_price_max": post.get("custom_price_max"),
-        "is_two_digit_price": post.get("is_two_digit_price", False),
-        "two_digit_min_token": post.get("two_digit_min_token"),
-        "two_digit_max_token": post.get("two_digit_max_token"),
-        "is_custom_price": post.get("is_custom_price", False),
-        "only_when_no_price": post.get("only_when_no_price", False),
-        "plus": post["plus"],
-        "amount": amount,
-        "status": "matched",
-        "created_at": now_text(),
-        "settled_at": None,
-        "result": None,
-        "winning_side": None,
-        "cancel_requested": False,
-        "cancel_requested_by": None,
-        "cancel_requested_at": None,
-        "cancel_rejected": False,
-        "cancel_rejected_by": None,
-        "cancel_rejected_at": None,
-    }
+        match = {
+            "match_id": match_id,
+            "round_id": post["round_id"],
+            "base_no": post.get("base_no") or STATE.get("base_no"),
+            "camp_name": post.get("camp_name") or STATE.get("camp_name"),
+            "chat_id": post.get("chat_id") or STATE.get("chat_id"),
+            "order_no": order_no,
+            "post_id": post["post_id"],
+            "posted_amount": int(post.get("amount", amount) or amount),
+            "maker_id": post["maker_id"],
+            "taker_id": taker_entry["taker_id"],
+            # เก็บ snapshot ชื่อ/เลขสมาชิก ณ ตอนจับคู่ เพื่อใหดูย้อนหลังได้ว่ารอบนี้ใครติดกับใคร
+            # แม้ภายหลังผู้เล่นเปลี่ยนชื่อ LINE รายงานรอบนี้ยังมีข้อมูลเดิมอ้างอิงคือ
+            "maker_name": maker.get("line_name") or maker.get("name") or fallback_name(post["maker_id"]),
+            "taker_name": taker.get("line_name") or taker.get("name") or fallback_name(taker_entry["taker_id"]),
+            "maker_member_no": maker.get("member_no"),
+            "taker_member_no": taker.get("member_no"),
+            "maker_side": post["maker_side"],
+            "raw_alias": post.get("raw_alias", ""),
+            "price_adjust_target": post.get("price_adjust_target"),
+            "price_adjust_min": post.get("price_adjust_min"),
+            "price_adjust_max": post.get("price_adjust_max"),
+            "custom_price_min": post.get("custom_price_min"),
+            "custom_price_max": post.get("custom_price_max"),
+            "is_two_digit_price": post.get("is_two_digit_price", False),
+            "two_digit_min_token": post.get("two_digit_min_token"),
+            "two_digit_max_token": post.get("two_digit_max_token"),
+            "is_custom_price": post.get("is_custom_price", False),
+            "only_when_no_price": post.get("only_when_no_price", False),
+            "plus": post["plus"],
+            "amount": amount,
+            "status": "matched",
+            "created_at": now_text(),
+            "settled_at": None,
+            "result": None,
+            "winning_side": None,
+            "cancel_requested": False,
+            "cancel_requested_by": None,
+            "cancel_requested_at": None,
+            "cancel_rejected": False,
+            "cancel_rejected_by": None,
+            "cancel_rejected_at": None,
+        }
 
-    MATCHES[match_id] = match
+        MATCHES[match_id] = match
 
-    taker_entry["status"] = "matched"
-    taker_entry["match_id"] = match_id
-    taker_entry["matched_at"] = now_text()
-    taker_entry.pop("counter_amount", None)
-    taker_entry.pop("counter_message_id", None)
-    taker_entry.pop("counter_by", None)
+        taker_entry["status"] = "matched"
+        taker_entry["match_id"] = match_id
+        taker_entry["matched_at"] = now_text()
+        taker_entry.pop("counter_amount", None)
+        taker_entry.pop("counter_message_id", None)
+        taker_entry.pop("counter_by", None)
 
-    # ไม่หัก remaining_amount และไม่ปิดโพสต์หลังจับคู่
-    # 1 โพสต์ = แม่แบบรายการ สามารถให้คนอื่นมาติดซ้ำได้เรื่อย ๆ จนกว่าจะปิดรอบ/เปลี่ยนค่าย/แจ้งผล
-    post["remaining_amount"] = int(post.get("amount", amount) or amount)
-    post["status"] = "open"
+        # ไม่หัก remaining_amount และไม่ปิดโพสต์หลังจับคู่
+        # 1 โพสต์ = แม่แบบรายการ สามารถใหคนอื่นมาติดซ้ำได้เรื่อย ๆ จนกว่าจะปิดรอบ/เปลี่ยนค่าย/แจ้งผล
+        post["remaining_amount"] = int(post.get("amount", amount) or amount)
+        post["status"] = "open"
 
-    # สำรองทันทีหลังสร้างคู่ติดสำเร็จ กันบอทค้างก่อนส่ง Flex / ก่อนตอบกลับ LINE
-    save_round_backup_db(reason="match_created")
+        # สำรองทันที่หลังสร้างคู่ติดสำเร็จ กันบอทค้างก่อนส่ง Flex / ก่อนตอบกลับ LINE
+        save_round_backup_db(reason="match_created")
 
-    # ส่ง FLEX ไปยัง maker และ taker โดยใช้ Multicast API (ไม่เสียโควตา)
-    # Multicast ส่งเฉพาะ maker_id และ taker_id และเนืองจากที่ maker เห็น FLEX คนละของ maker
-    multicast_flex_to_users_async(
-        [match["maker_id"]], 
-        "จับคู่สำเร็จ", 
-        matched_flex_for_user(match, match["maker_id"])
-    )
-    
-    # Multicast ส่งเฉพาะ taker_id และเนืองจากที่ taker เห็น FLEX คนละของ taker
-    multicast_flex_to_users_async(
-        [match["taker_id"]], 
-        "จับคู่สำเร็จ", 
-        matched_flex_for_user(match, match["taker_id"])
-    )
+    # ส่ง Flex หาทั้งคู่แบบ async ทันที่ ไม่ sync profile ก่อน
+    push_flex_async(match["maker_id"], "จับคู่สำเร็จ", matched_flex_for_user(match, match["maker_id"]))
+    push_flex_async(match["taker_id"], "จับคู่สำเร็จ", matched_flex_for_user(match, match["taker_id"]))
 
     # เงียบในกลุ่มเมื่อแผลสมบูรณ์
     return None
@@ -9742,6 +10478,14 @@ def settle_round(result_value: int):
     if STATE.get("settled"):
         return f"รอบนี้แจ้งผลไปแล้ว ผลเดิมคือ {STATE.get('result')}"
 
+    _camp_name = STATE.get("camp_name") or "-"
+    if STATE.get("opened"):
+        return f"❌ ค่าย {_camp_name} ยังเปิดรับอยู่\nกรุณาปิดก่อนแจ้งผล: ปิด {_camp_name}"
+
+
+
+
+
     unresolved = two_digit_unresolved_warning()
     if unresolved:
         return unresolved
@@ -9754,6 +10498,7 @@ def settle_round(result_value: int):
 
     STATE["result"] = result_value
     STATE["settled"] = True
+    STATE["settled_at_ts"] = time.time()
     STATE["opened"] = False
     STATE["updated_at"] = now_text()
     STATE["pending_result"] = None
@@ -9762,7 +10507,7 @@ def settle_round(result_value: int):
     clear_pending_round_clear()
 
     if not target_matches:
-        return f"แจ้งผล {result_value} แล้ว แต่ไม่มีรายการที่จับคู่สำเร็จในรอบนี้"
+        return public_result_reply_payload(result_value)
 
     user_rows = {}
     user_net = {}
@@ -9773,6 +10518,10 @@ def settle_round(result_value: int):
     price_text = current_price_text()
 
     for match in target_matches:
+        # guard: กัน match ที่ถูก settle ไปแล้วถูกคิดซ้ำ
+        if match.get("status") == "settled":
+            continue
+
         maker_id = match["maker_id"]
         taker_id = match["taker_id"]
         amount = match["amount"]
@@ -9904,6 +10653,8 @@ def settle_round(result_value: int):
         )
 
     save_user_db()
+    save_round_backup_db(reason="settle_round")  # ← บันทึก ROUNDS + SCORE
+    archive_settled_round_to_history(STATE)       # ← เก็บลง SCOREBOARD_HISTORY กันหาย
 
     # ส่ง Flex สรุปผลแบบ async เพื่อลดอาการหน่วง
     for uid, rows in user_rows.items():
@@ -9937,6 +10688,7 @@ def settle_round_all_jow(reason: str):
 
     STATE["result"] = reason
     STATE["settled"] = True
+    STATE["settled_at_ts"] = time.time()
     STATE["opened"] = False
     STATE["updated_at"] = now_text()
     STATE["pending_result"] = None
@@ -9945,12 +10697,16 @@ def settle_round_all_jow(reason: str):
     clear_pending_round_clear()
 
     if not target_matches:
-        return f"แจ้งผล {reason} แล้ว แต่ไม่มีรายการที่จับคู่สำเร็จในรอบนี้"
+        return public_result_reply_payload(reason)
 
     user_rows = {}
     user_net = {}
 
     for match in target_matches:
+        # guard: กัน match ที่ถูก settle ไปแล้วถูกคิดซ้ำ
+        if match.get("status") == "settled":
+            continue
+
         maker_id = match["maker_id"]
         taker_id = match["taker_id"]
         amount = int(match.get("amount", 0) or 0)
@@ -10005,6 +10761,8 @@ def settle_round_all_jow(reason: str):
         user_net[taker_id] = user_net.get(taker_id, 0)
 
     save_user_db()
+    save_round_backup_db(reason="settle_round_all_jow")  # ← บันทึก ROUNDS + SCORE
+    archive_settled_round_to_history(STATE)               # ← เก็บลง SCOREBOARD_HISTORY กันหาย
 
     for uid, rows in user_rows.items():
         push_flex_async(
@@ -10026,6 +10784,12 @@ def handle_special_result_with_double_confirm(reason: str):
 
     if STATE.get("settled"):
         return f"รอบนี้แจ้งผลไปแล้ว ผลเดิมคือ {STATE.get('result')}"
+
+    _camp_name_jow = STATE.get("camp_name") or "-"
+    if STATE.get("opened"):
+        return f"❌ ค่าย {_camp_name_jow} ยังเปิดรับอยู่\nกรุณาปิดก่อนแจ้งผล: ปิด {_camp_name_jow}"
+
+
 
     token = f"SPECIAL:{reason}"
     pending = STATE.get("pending_result")
@@ -10057,6 +10821,10 @@ def handle_result_with_double_confirm(result_value: int):
 
     if STATE.get("settled"):
         return f"รอบนี้แจ้งผลไปแล้ว ผลเดิมคือ {STATE.get('result')}"
+
+    _camp_name_dc = STATE.get("camp_name") or "-"
+    if STATE.get("opened"):
+        return f"❌ ค่าย {_camp_name_dc} ยังเปิดรับอยู่\nกรุณาปิดก่อนแจ้งผล: ปิด {_camp_name_dc}"
 
     unresolved = two_digit_unresolved_warning()
     if unresolved:
@@ -10235,6 +11003,13 @@ def rollback_round_result(rollback_by: str = "-"):
             + (f"\n...อีก {len(insufficient) - 20} รายการ" if len(insufficient) > 20 else "")
         )
 
+    rollback_at = now_text()
+
+    # ── ล็อก STATE ก่อนเสมอ กันแจ้งผลซ้อนระหว่างย้อนผล ──────────────────
+    # เซ็ต settled=True ค้างไว้ก่อน จนกว่า mutate ทุกอย่างเสร็จแล้วค่อยเซ็ต False
+    # ถ้า crash กลางทาง settled จะยังเป็น True → admin ต้องย้อนผลอีกครั้ง แทนที่จะแจ้งผลซ้ำ
+    STATE["pending_rollback_in_progress"] = True
+
     # ดึงเครดิตที่เคย payout กลับ
     for uid, debit in debits.items():
         user = USERS.get(uid)
@@ -10242,7 +11017,6 @@ def rollback_round_result(rollback_by: str = "-"):
             user["credit"] = int(user.get("credit", 0) or 0) - int(debit or 0)
 
     # เปลี่ยนบิลกลับไปรอแจ้งผลใหม่
-    rollback_at = now_text()
     for match in target_matches:
         history = match.setdefault("rollback_history", [])
         history.append({
@@ -10262,19 +11036,23 @@ def rollback_round_result(rollback_by: str = "-"):
         match["rolled_back_at"] = rollback_at
         match["rolled_back_by"] = rollback_by or "-"
 
+    # ลบกำไรออกจาก profit.json (atomic: ลบก่อน เซ็ต state หลัง)
     removed_profit, removed_profit_records = rollback_profit_for_round(current_round_id, rollback_by=rollback_by)
 
+    # เซ็ต STATE กลับหลังจาก mutate ทุกอย่างเสร็จแล้ว
     STATE["result"] = None
     STATE["settled"] = False
     STATE["opened"] = False
     STATE["updated_at"] = rollback_at
     STATE["pending_result"] = None
     STATE["pending_result_at"] = None
+    STATE.pop("pending_rollback_in_progress", None)
     clear_pending_rollback()
     clear_pending_price()
     clear_pending_round_clear()
 
     save_user_db()
+    save_round_backup_db(reason="rollback_round_result")
 
     return (
         f"✅ ย้อนผล ค่าย {STATE.get('camp_name') or '-'} เรียบร้อย\n"
@@ -10388,17 +11166,17 @@ def current_round_report():
         pending_text += f"\nCR ที่รอยืนยัน: ค่าย {pending_clear.get('camp_name') or '-'}"
 
     return (
-        f"CK | สถานะรอบปัจจุบัน\n\n"
-        f"ค่าย: {STATE.get('camp_name') or '-'}\n"
-        f"ห้องรอบ: {STATE.get('chat_id') or '-'}\n"
-        f"สถานะ: {status}\n"
-        f"ราคาช่าง: {current_price_text()}\n"
-        f"ผล: {STATE.get('result')}\n"
-        f"แผลสมบูรณ์รอคิดผล: {matched_count}\n"
-        f"แผลที่คิดผลแล้ว: {settled_count}\n"
-        f"แผลรอยืนยัน: {pending_count}\n"
-        f"แผล ชตย รอคิดผล: {no_price_only_count}\n"
-        f"แผลยกเลิก: {cancelled_count}"
+        f"📋CK | สถานะรอบปัจจุบัน\n\n"
+        f"🏟️ ค่าย: {STATE.get('camp_name') or '-'}\n"
+        f"🚦 สถานะ: {status}\n"
+        f"💵 ราคาช่าง: {current_price_text()}\n"
+        f"🏁 ผล: {STATE.get('result')}\n"
+        f"✅ แผลสมบูรณ์รอคิดผล: {matched_count}\n"
+        f"💯 แผลที่คิดผลแล้ว: {settled_count}\n"
+        f"⏳ แผลรอยืนยัน: {pending_count}\n"
+        f"⚪ แผล ชตย รอคิดผล: {no_price_only_count}\n"
+        f"❌ แผลยกเลิก: {cancelled_count}\n"
+        f"💰 กำลังใช้อยู่รวม: {total_active_credit_all():,}"
         f"{pending_text}"
     )
 
@@ -10503,58 +11281,6 @@ def is_listplay_command(text: str) -> bool:
     return clean in {"listplay", "listplays"}
 
 
-
-def get_line_message_quota():
-    """ดึงข้อมูลโควตาข้อความจาก LINE API"""
-    try:
-        headers = {
-            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        response = requests.get(
-            "https://api.line.me/v2/bot/message/quota",
-            headers=headers,
-            timeout=5
-        )
-        if response.status_code == 200:
-            data = response.json()
-            return {"success": True, "remaining_quota": data.get("value", 0)}
-        else:
-            return {"success": False, "error": f"HTTP {response.status_code}"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def quota_report():
-    """สร้างรายงานโควตาข้อความ"""
-    quota_info = get_line_message_quota()
-    if not quota_info.get("success"):
-        return f"❌ ไม่สามารถดึงข้อมูลโควตาได้\nข้อผิดพลาด: {quota_info.get('error', 'Unknown')}"
-    
-    remaining = quota_info.get("remaining_quota", 0)
-    from datetime import datetime
-    message = f"""📊 โควตาข้อความ LINE Official Account
-
-⏰ เวลา: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
-
-📈 สถิติการใช้งาน:
-• เหลือ: {remaining:,} ข้อความ
-
-⚠️ หมายเหตุ:
-• Broadcast API ไม่นับในโควตา
-• Push API นับในโควตา
-• ข้อมูลอาจมีความล่าช้า 1-2 นาที
-"""
-    return message
-
-
-def is_quota_command(text: str) -> bool:
-    """ตรวจสอบว่าเป็นคำสั่งดูโควตาหรือไม่"""
-    if not text:
-        return False
-    upper = text.upper().strip()
-    return upper in {"QUOTA", "/QUOTA"}
-
 def _listplay_display_name(name: str) -> str:
     """ทำชื่อให้แสดงในบรรทัด listplay โดยไม่ให้ขึ้นบรรทัดใหม่/ยาวเกินไป"""
     text = re.sub(r"\s+", " ", str(name or "-")).strip()
@@ -10581,19 +11307,21 @@ def format_listplay_play_text(match: dict) -> str:
 
 def current_round_listplay_report(limit: int = 80) -> str:
     """
-    รายงานแบบสั้นตามที่ต้องการ:
+    รายงานแบบสั้นทุกค่ายที่ยังไม่ settled:
     นาย A เล่น 320-350ล500 กับ นาย B
-    นาย A เล่น 3-7ล500 กับ นาย B
     """
-    if STATE.get("round_id") is None:
+    # รวบรวมทุก round_state ที่ยังไม่ settled (ทั้งเปิดและปิดรอผล)
+    active_states = [
+        (base_no, st)
+        for base_no, st in ROUNDS.items()
+        if isinstance(st, dict) and st.get("round_id") and not st.get("settled")
+    ]
+
+    if not active_states:
         return "ยังไม่มีรอบปัจจุบัน"
 
-    current_round_id = STATE.get("round_id")
-    rows = [
-        m for m in MATCHES.values()
-        if m.get("round_id") == current_round_id
-        and m.get("status") == "matched"
-    ]
+    # เรียงตาม opened_at_ts
+    active_states.sort(key=lambda x: float(x[1].get("opened_at_ts") or 0))
 
     def sort_key(match):
         try:
@@ -10601,35 +11329,51 @@ def current_round_listplay_report(limit: int = 80) -> str:
         except Exception:
             return 0
 
-    rows = sorted(rows, key=sort_key)
+    all_lines = []
+    total_pairs = 0
 
-    if not rows:
-        return (
-            f"listplay | ค่าย: {STATE.get('camp_name') or '-'}\n\n"
-            "ยังไม่มีรายการที่จับคู่สำเร็จและรอผลในรอบนี้"
-        )
+    for base_no, st in active_states:
+        round_id = st.get("round_id")
+        camp_name = st.get("camp_name") or f"ฐาน{base_no}"
+        status_label = "เปิดรับอยู่" if st.get("opened") else "ปิดแล้ว/รอผล"
 
-    lines = [
-        f"listplay | ค่าย: {STATE.get('camp_name') or '-'}",
-        f"จำนวนคู่รอผล: {len(rows):,}",
+        rows = [
+            m for m in MATCHES.values()
+            if m.get("round_id") == round_id
+            and m.get("status") == "matched"
+        ]
+        rows = sorted(rows, key=sort_key)
+        total_pairs += len(rows)
+
+        all_lines.append(f"▶ ค่าย: {camp_name} [{status_label}] | คู่รอผล: {len(rows):,}")
+
+        if not rows:
+            all_lines.append("  ยังไม่มีรายการที่จับคู่สำเร็จ")
+        else:
+            count = 0
+            for m in rows:
+                if count >= limit:
+                    all_lines.append(f"  ...อีก {len(rows) - limit:,} คู่")
+                    break
+                maker_name = _listplay_display_name(m.get("maker_name") or user_display_name(m.get("maker_id")))
+                taker_name = _listplay_display_name(m.get("taker_name") or user_display_name(m.get("taker_id")))
+                play_text = format_listplay_play_text(m)
+                price_note = ""
+                if m.get("is_custom_price") or m.get("is_two_digit_price"):
+                    custom_price_text = format_match_price_text_for_active_list(m)
+                    if custom_price_text and custom_price_text != "-":
+                        price_note = f" | ราคาเล่น {custom_price_text}"
+                all_lines.append(f"  นาย {maker_name} เล่น {play_text} กับ นาย {taker_name}{price_note}")
+                count += 1
+
+        all_lines.append("")
+
+    header = [
+        f"listplay | ทุกค่ายที่เปิด ({len(active_states)} ค่าย) | รวม {total_pairs:,} คู่",
         "",
     ]
 
-    for m in rows[:limit]:
-        maker_name = _listplay_display_name(m.get("maker_name") or user_display_name(m.get("maker_id")))
-        taker_name = _listplay_display_name(m.get("taker_name") or user_display_name(m.get("taker_id")))
-        play_text = format_listplay_play_text(m)
-        price_note = ""
-        if m.get("is_custom_price") or m.get("is_two_digit_price"):
-            custom_price_text = format_match_price_text_for_active_list(m)
-            if custom_price_text and custom_price_text != "-":
-                price_note = f" | ราคาเล่น {custom_price_text}"
-        lines.append(f"นาย {maker_name} เล่น {play_text} กับ นาย {taker_name}{price_note}")
-
-    if len(rows) > limit:
-        lines.append(f"...อีก {len(rows) - limit:,} คู่")
-
-    return "\n".join(lines).strip()
+    return "\n".join(header + all_lines).strip()
 
 
 def users_report():
@@ -10684,50 +11428,134 @@ def active_credit_amount_for_user(user_id: str) -> int:
     return total
 
 
+def total_active_credit_all() -> int:
+    """
+    ยอดเครดิตที่ถูกกันไว้รวมทั้งระบบ (กำลังใช้อยู่)
+    คิดจากบิลที่จับคู่แล้วและยังไม่คิดผล โดยนับทั้งฝั่งเจ้าของและฝั่งผู้ติด
+    ให้ตรงกับ "กำลังใช้อยู่รวม" ในคำสั่ง CALL
+    """
+    total = 0
+    for match in list(MATCHES.values()):
+        if not isinstance(match, dict):
+            continue
+        if match.get("status") != "matched":
+            continue
+
+        round_state = get_state_by_round_id(match.get("round_id"))
+        if round_state and round_state.get("settled"):
+            continue
+
+        try:
+            amount = int(match.get("amount", 0) or 0)
+        except Exception:
+            amount = 0
+
+        # นับทั้งฝั่งเจ้าของโพสต์และฝั่งผู้ติด (เหมือนผลรวมใน CALL)
+        total += amount * 2
+
+    return total
+
+
+def topup_capital_today_by_user(target_date_str: str = None) -> dict:
+    """
+    รวม 'ทุน' (ยอดเติมเครดิต) ของแต่ละลูกค้าในวันที่กำหนด (ค่าเริ่มต้น = วันนี้)
+
+    ทุน = ผลรวมยอดเติมจากสลิปทั้งหมดในวันนั้น
+    ตัวอย่าง: เติม 1000 จำนวน 3 รอบในวันเดียว -> ทุน = 3000
+
+    คืนค่าเป็น dict {user_id: ทุนรวมของวันนั้น}
+    โดยอ้างอิงวันจาก created_at ของสลิป (รูปแบบ dd/mm/YYYY HH:MM:SS ตามเวลาไทย)
+    """
+    if target_date_str is None:
+        target_date_str = datetime.now(tz=_TZ_THAI).strftime("%d/%m/%Y")
+
+    result = {}
+    slips = SLIP_TOPUPS.get("slips", {}) or {}
+    for slip in slips.values():
+        if not isinstance(slip, dict):
+            continue
+
+        created_at = slip.get("created_at") or ""
+        # created_at = "dd/mm/YYYY HH:MM:SS" -> เทียบเฉพาะส่วนวันที่
+        slip_date = created_at.split(" ")[0] if created_at else ""
+        if slip_date != target_date_str:
+            continue
+
+        user_id = slip.get("user_id")
+        if not user_id:
+            continue
+
+        try:
+            amount = int(slip.get("credit_added", 0) or 0)
+        except Exception:
+            amount = 0
+
+        if amount <= 0:
+            continue
+
+        result[user_id] = result.get(user_id, 0) + amount
+
+    return result
+
+
 def call_report():
     # CALL แสดงลูกค้าที่มีเครดิตคงเหลือ หรือมียอดที่กำลังใช้อยู่ในบิลรอผล
     all_rows = sorted(USERS.values(), key=lambda u: int(u.get("member_no", 999999)))
+
+    today_str = datetime.now(tz=_TZ_THAI).strftime("%d/%m/%Y")
+    capital_today_map = topup_capital_today_by_user(today_str)
 
     rows = []
     for u in all_rows:
         credit = user_credit_amount(u)
         active_amount = active_credit_amount_for_user(u.get("user_id"))
         total_amount = credit + active_amount
-        if total_amount > 0:
-            rows.append((u, credit, active_amount, total_amount))
+        capital_today = capital_today_map.get(u.get("user_id"), 0)
+        # แสดงลูกค้าที่มีเครดิต/กำลังใช้อยู่ หรือมีการเติมทุนวันนี้
+        if total_amount > 0 or capital_today > 0:
+            rows.append((u, credit, active_amount, total_amount, capital_today))
 
-    total_credit = sum(credit for _, credit, _, _ in rows)
-    total_active = sum(active_amount for _, _, active_amount, _ in rows)
+    total_credit = sum(credit for _, credit, _, _, _ in rows)
+    total_active = sum(active_amount for _, _, active_amount, _, _ in rows)
     total_all = total_credit + total_active
+    total_capital_today = sum(capital_today for _, _, _, _, capital_today in rows)
+
+    divider = "━━━━━━━━━━━━━━"
 
     lines = [
-        "CALL | รายชื่อลูกค้าที่มีเครดิต",
-        f"จำนวนลูกค้าที่มีเครดิต/กำลังใช้อยู่: {len(rows)} คน",
-        f"เครดิตคงเหลือรวม: {total_credit:,}",
-        f"กำลังใช้อยู่รวม: {total_active:,}",
-        f"เครดิตรวมทั้งหมด: {total_all:,}",
-        "",
+        "📋 CALL | ลูกค้าที่มีเครดิต",
+        f"👥 ทั้งหมด {len(rows)} คน",
+        divider,
+        f"💰 คงเหลือรวม : {total_credit:,}",
+        f"⏳ กำลังใช้รวม : {total_active:,}",
+        f"📊 เครดิตรวม : {total_all:,}",
+        f"🏦 ทุนวันนี้รวม : {total_capital_today:,}",
+        f"📅 {today_str}",
+        divider,
     ]
 
     if not rows:
         lines.append("ยังไม่มีลูกค้าที่มีเครดิต")
         return "\n".join(lines)
 
-    for u, credit, active_amount, total_amount in rows[:80]:
+    for u, credit, active_amount, total_amount, capital_today in rows[:80]:
         name = u.get("line_name") or u.get("name")
+
+        lines.append(f"#{u.get('member_no')}  {name}")
         if active_amount > 0:
-            lines.append(
-                f"ID {u.get('member_no')} | {name} | คงเหลือ {credit:,} | กำลังใช้ {active_amount:,} | รวม {total_amount:,}"
-            )
+            lines.append(f"  • คงเหลือ : {credit:,}")
+            lines.append(f"  • กำลังใช้ : {active_amount:,}")
+            lines.append(f"  • รวม : {total_amount:,}")
         else:
-            lines.append(
-                f"ID {u.get('member_no')} | {name} | เครดิต {credit:,}"
-            )
+            lines.append(f"  • เครดิต : {credit:,}")
+        if capital_today > 0:
+            lines.append(f"  • ทุนวันนี้ : {capital_today:,}")
+        lines.append("")
 
     if len(rows) > 80:
         lines.append(f"...อีก {len(rows) - 80} คน")
 
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
 
 
 def profit_report():
@@ -10966,61 +11794,6 @@ def is_add_admin_command(text: str) -> bool:
     return re.match(r"^เพิ่มแอดมิน(?:\s+|$)", clean) is not None
 
 
-def is_clear_admin_command(text: str) -> bool:
-    """ตรวจคำสั่ง ล้างแอดมิน (ต้องพิมพ์ต่อท้ายด้วยคำว่า ยืนยัน กันพิมพ์พลาด)
-    เช่น: ล้างแอดมิน ยืนยัน
-    """
-    clean = re.sub(r"\s+", "", (text or "").strip()).lower()
-    return clean in {
-        "ล้างแอดมินยืนยัน",
-        "ลางแอดมินยืนยัน",
-        "clearadminconfirm",
-        "clearadminsconfirm",
-    }
-
-
-def is_clear_admin_prompt(text: str) -> bool:
-    """ตรวจคำว่า ล้างแอดมิน เฉย ๆ (ยังไม่ยืนยัน) เพื่อเตือนวิธีใช้ที่ถูกต้อง"""
-    clean = re.sub(r"\s+", "", (text or "").strip()).lower()
-    return clean in {"ล้างแอดมิน", "ลางแอดมิน", "clearadmin", "clearadmins"}
-
-
-def clear_dynamic_admins(cleared_by_id: str):
-    """ล้างแอดมินทั้งหมดใน admins.json เหลือเฉพาะแอดมินที่ตั้งไว้ใน .env"""
-    admins = DYNAMIC_ADMINS.setdefault("admins", {})
-    count = len(admins)
-
-    if count == 0:
-        return "ℹ️ ไม่มีแอดมินที่เพิ่มผ่านแชทให้ล้าง (เหลือแค่แอดมินจาก .env อยู่แล้ว)"
-
-    cleared_rows = [
-        f"- {(info or {}).get('line_name') or fallback_name(uid)}"
-        for uid, info in admins.items()
-    ]
-
-    admins.clear()
-    DYNAMIC_ADMINS["updated_at"] = datetime.now().isoformat()
-    save_admin_db()
-
-    lines = [
-        f"✅ ล้างแอดมินเรียบร้อย ({count} คน)",
-        "",
-        "แอดมินที่ถูกล้าง:",
-        *cleared_rows,
-        "",
-        f"เหลือเฉพาะแอดมินจาก .env จำนวน {len([x for x in ADMIN_USER_IDS if x])} คน",
-    ]
-    return "\n".join(lines)
-
-
-def is_remove_admin_command(text: str) -> bool:
-    """ตรวจคำสั่ง ลบแอดมิน @ชื่อไลน์"""
-    clean = (text or "").strip()
-    # กันวรรณยุกต์/สระไทยหลุดนำหน้าข้อความจากคีย์บอร์ด
-    clean = re.sub(r"^[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+", "", clean)
-    return re.match(r"^ลบแอดมิน(?:\s+|$)", clean) is not None
-
-
 def is_admin_list_command(text: str) -> bool:
     """ตรวจคำสั่ง List / เช็คแอดมิน เพื่อดูรายชื่อแอดมินทั้งหมด"""
     clean = re.sub(r"\s+", "", (text or "").strip()).lower()
@@ -11139,6 +11912,44 @@ def extract_mentioned_user_ids(event):
     return user_ids
 
 
+def is_clear_admin_command(text: str) -> bool:
+    """ตรวจคำสั่ง ล้างแอดมิน เพื่อลบแอดมินทั้งหมดใน admins.json (เหลือแค่ ENV)"""
+    clean = re.sub(r"\s+", "", (text or "").strip()).lower()
+    return clean in {
+        "ล้างแอดมิน",
+        "ลบแอดมิน",
+        "clearadmin",
+        "clearadmins",
+        "resetadmin",
+        "resetadmins",
+    }
+
+
+def clear_dynamic_admins(cleared_by_id: str) -> str:
+    """ล้างแอดมินทั้งหมดใน admins.json เหลือแค่ที่ตั้งไว้ใน .env"""
+    admins = DYNAMIC_ADMINS.get("admins", {}) if isinstance(DYNAMIC_ADMINS, dict) else {}
+    count = len(admins) if isinstance(admins, dict) else 0
+
+    if count == 0:
+        return (
+            "ℹ️ ไม่มีแอดมินใน admins.json\n"
+            "แอดมินที่ตั้งไว้ใน .env ยังคงอยู่ตามเดิม"
+        )
+
+    DYNAMIC_ADMINS["admins"] = {}
+    DYNAMIC_ADMINS["updated_at"] = datetime.now().isoformat()
+    save_admin_db()
+
+    cleared_by_name = user_display_name(cleared_by_id)
+    return (
+        f"✅ ล้างแอดมินเรียบร้อย\n\n"
+        f"ลบออก {count} คน จาก admins.json\n"
+        f"ล้างโดย: {cleared_by_name}\n\n"
+        f"แอดมินที่ตั้งไว้ใน .env ยังคงมีสิทธิ์ตามเดิม\n"
+        f"ใช้คำสั่ง List เพื่อดูรายชื่อแอดมินที่เหลือ"
+    )
+
+
 def add_admins_from_mentions(event, added_by_id: str):
     """เพิ่มแอดมินจากคนที่ถูกแท็กในข้อความ เพิ่มแอดมิน @ชื่อไลน์"""
     mentioned_user_ids = extract_mentioned_user_ids(event)
@@ -11201,67 +12012,6 @@ def add_admins_from_mentions(event, added_by_id: str):
     return "\n".join(lines)
 
 
-def remove_admins_from_mentions(event, removed_by_id: str):
-    """ลบแอดมินที่ถูกแท็กในข้อความ ลบแอดมิน @ชื่อไลน์
-    ลบได้เฉพาะแอดมินที่เพิ่มผ่าน admins.json (dynamic) เท่านั้น
-    แอดมินที่ตั้งค่าจาก .env (ADMIN_USER_IDS) ต้องไปแก้ .env โดยตรง เพื่อกันลบผิดคนสำคัญผ่านแชท
-    """
-    mentioned_user_ids = extract_mentioned_user_ids(event)
-    if not mentioned_user_ids:
-        return (
-            "⚠️ ลบแอดมินไม่สำเร็จ\n\n"
-            "กรุณาแท็กชื่อ LINE ของคนที่ต้องการลบ เช่น\n"
-            "ลบแอดมิน @ชื่อไลน์\n\n"
-            "หมายเหตุ: ต้องแท็กจริงใน LINE ไม่ใช่พิมพ์ @ เอง"
-        )
-
-    admins = DYNAMIC_ADMINS.setdefault("admins", {})
-
-    removed_rows = []
-    not_found_rows = []
-    env_protected_rows = []
-
-    for target_user_id in mentioned_user_ids:
-        target_user = USERS.get(target_user_id, {}) if isinstance(USERS, dict) else {}
-        target_name = (
-            (admins.get(target_user_id) or {}).get("line_name")
-            or (target_user or {}).get("line_name")
-            or (target_user or {}).get("name")
-            or fallback_name(target_user_id)
-        )
-
-        if target_user_id in admins:
-            del admins[target_user_id]
-            removed_rows.append(f"- {target_name}")
-        elif target_user_id in ADMIN_USER_IDS:
-            env_protected_rows.append(f"- {target_name}")
-        else:
-            not_found_rows.append(f"- {target_name}")
-
-    DYNAMIC_ADMINS["updated_at"] = datetime.now().isoformat()
-    save_admin_db()
-
-    lines = []
-    if removed_rows:
-        lines.append("✅ ลบแอดมินเรียบร้อย")
-        lines.extend(["", "แอดมินที่ลบ:", *removed_rows])
-    else:
-        lines.append("⚠️ ไม่พบแอดมินที่ลบได้")
-
-    if env_protected_rows:
-        lines.extend([
-            "",
-            "ลบไม่ได้ (เพิ่มไว้ใน .env / ADMIN_USER_IDS):",
-            *env_protected_rows,
-            "ต้องไปลบ user_id ออกจาก ADMIN_USER_IDS ใน .env แล้วรีสตาร์ตบอทเอง",
-        ])
-
-    if not_found_rows:
-        lines.extend(["", "ไม่พบในรายชื่อแอดมิน:", *not_found_rows])
-
-    return "\n".join(lines)
-
-
 # ======================================================
 # Concurrency guard
 # ======================================================
@@ -11285,6 +12035,17 @@ settle_round = synchronized_state(settle_round)
 settle_round_all_jow = synchronized_state(settle_round_all_jow)
 handle_special_result_with_double_confirm = synchronized_state(handle_special_result_with_double_confirm)
 handle_result_with_double_confirm = synchronized_state(handle_result_with_double_confirm)
+# ── ฟังก์ชันที่ยังขาด lock (เพิ่มเติม) ───────────────────────────────────
+# rollback แก้เครดิต + กำไร + STATE พร้อมกัน ต้องใช้ lock เดียวกับ settle
+handle_rollback_result_command = synchronized_state(handle_rollback_result_command)
+rollback_round_result = synchronized_state(rollback_round_result)
+# ปรับเครดิตโดยแอดมิน แก้ credit ใน USERS โดยตรง
+handle_credit_adjust = synchronized_state(handle_credit_adjust)
+# ตั้งเริ่มต้นเลข 2 ตัว แก้ STATE
+set_two_digit_start = synchronized_state(set_two_digit_start)
+# ล้างกำไร / ล้างออเดอร์ แก้ PROFIT / ORDER_STATE
+reset_profit_report = synchronized_state(reset_profit_report)
+reset_order_report = synchronized_state(reset_order_report)
 
 # ======================================================
 # Webhook
@@ -12306,11 +13067,17 @@ def is_round_control_command_text(text: str, user_id: str = None) -> bool:
     if not is_admin(user_id or ""):
         return False
 
-    if parse_open_command(raw):
+    if parse_open_command(raw) is not None:
         return True
     if parse_change_camp_command(raw):
         return True
-    if raw == "ปิด":
+    if raw == "ปิด" or re.match(r"^ปิด\s+\S", raw):
+        return True
+    if re.match(r"^ยกเลิก\s+\S", raw):
+        return True
+    if re.match(r"^เปลี่ยนราคา\s+\S", raw):
+        return True
+    if re.match(r"^ช่าง\s+.+?\s+\d{3}", raw):
         return True
     if is_continue_round_command(raw):
         return True
@@ -12355,11 +13122,9 @@ def is_backoffice_relevant_text(text: str, user_id: str = None) -> bool:
     # จึงไม่ปล่อยผ่าน quiet mode สำหรับหลังบ้าน/คำสั่งแอดมิน
     if is_add_admin_command(raw):
         return True
-    if is_remove_admin_command(raw):
-        return True
-    if is_clear_admin_prompt(raw) or is_clear_admin_command(raw):
-        return True
     if is_admin_list_command(raw):
+        return True
+    if is_clear_admin_command(raw):
         return True
     if is_credit_check_mention_command(raw):
         return True
@@ -12410,6 +13175,9 @@ def should_process_text_message(event, text: str) -> bool:
     if is_admin(user_id) and is_backoffice_relevant_text(raw, user_id=user_id):
         return True
 
+    if is_admin(user_id) and raw.strip().lower() == "testscore":
+        return True
+
     if is_backoffice_chat(event):
         return is_backoffice_relevant_text(raw, user_id=user_id)
 
@@ -12423,6 +13191,7 @@ def should_process_text_message(event, text: str) -> bool:
             or is_bank_account_request(raw)
             or is_withdrawal_command(raw)
             or is_scoreboard_command(raw)
+            or raw.replace(" ", "") in {"รายการ", "รายการเล่น", "ค่ายที่เปิด", "เปิดอยู่"}
         ):
             return True
 
@@ -12431,7 +13200,18 @@ def should_process_text_message(event, text: str) -> bool:
             return True
 
         # โพสต์แผลเล่น เช่น ชล500, ชถ500, 320-350ล500
+        # รองรับชื่อค่ายนำหน้า/กลาง/หลัง เช่น เมม ชล 500, ชล เมม 500
         if parse_offer(raw):
+            return True
+        # ถ้า parse_offer ตรงๆ ไม่ได้ ลองตัดชื่อค่ายออกก่อน
+        _c, _rem, _bn = find_camp_in_text(raw)
+        if _c == "__ambiguous__":
+            return True  # ambiguous — ให้ผ่านเพื่อแจ้งลูกค้า
+        if _c and parse_offer(_rem):
+            return True
+        # ตรวจ ambiguous จากชื่อค่ายล้วนๆ (กรณี alias ไม่ถูก)
+        _kw_r = find_camp_keyword_only(raw)
+        if _kw_r and len(_kw_r) >= 1 and _kw_r[0] == "__ambiguous__":
             return True
 
         # คำว่า ต/ติด ให้บอทสนใจเฉพาะเมื่อ reply ข้อความเท่านั้น
@@ -12453,77 +13233,12 @@ def should_process_text_message(event, text: str) -> bool:
 
 # ======================================================
 # CLEAR ALL — ล้างสกอ / รอบทุกรอบ / Backup ทั้งหมด
+# ======================================================
+# CLEAR ALL — ล้างสกอ / รอบทุกรอบ / Backup ทั้งหมด
 # ใช้ได้เฉพาะแอดมิน และต้องยืนยัน 2 ครั้ง
 # ======================================================
 def handle_clear_all(event, user_id):
-    global STATE, ROUNDS, ACTIVE_BASE_NO, POSTS, MATCHES, CLEAR_ALL_PENDING
-
-    now = time.time()
-
-    # ครั้งแรก — รอยืนยัน
-    if user_id not in CLEAR_ALL_PENDING or now - CLEAR_ALL_PENDING[user_id] > 60:
-        CLEAR_ALL_PENDING[user_id] = now
-        reply_text(
-            event.reply_token,
-            "⚠️ CLEAR ALL จะล้างทุกอย่างต่อไปนี้:\n"
-            "- สกอและคู่ทั้งหมด\n"
-            "- รอบทุกรอบ (ทุกฐาน)\n"
-            "- Backup ทั้งหมด\n"
-            "- ออเดอร์ทั้งหมด\n\n"
-            "⚠️ พิมพ์ CLEAR ALL อีกครั้งภายใน 60 วินาที เพื่อยืนยัน"
-        )
-        return
-
-    # ครั้งที่ 2 — ยืนยันแล้ว ล้างจริง
-    CLEAR_ALL_PENDING.pop(user_id, None)
-
-    with STATE_LOCK:
-        # ล้าง POSTS และ MATCHES ใน memory
-        POSTS.clear()
-        MATCHES.clear()
-
-        # ล้าง ROUNDS ทุกฐาน
-        for base_no in list(ROUNDS.keys()):
-            ROUNDS[base_no] = make_round_state(base_no)
-
-        # รีเซ็ต STATE กลับเป็นฐาน 1
-        ACTIVE_BASE_NO = "1"
-        STATE = ROUNDS["1"]
-
-        # รีเซ็ต ORDER
-        ORDER_STATE["next_order_no"] = ORDER_START_NO
-        ORDER_STATE["last_reset"] = datetime.now().isoformat()
-        try:
-            save_order_db()
-        except Exception as e:
-            print(f"CLEAR ALL save_order_db error: {e}")
-
-        # ล้าง round_backups
-        try:
-            if os.path.exists(ROUND_BACKUP_DIR):
-                import shutil
-                shutil.rmtree(ROUND_BACKUP_DIR)
-            os.makedirs(ROUND_BACKUP_DIR, exist_ok=True)
-        except Exception as e:
-            print(f"CLEAR ALL backup dir error: {e}")
-
-        # ล้าง slip_topups
-        # หมายเหตุ: CLEAR ALL "ไม่" ล้างประวัติสลิป (SLIP_TOPUPS) อีกต่อไป
-        # เพื่อกันการนำสลิปเก่ากลับมาเติมซ้ำหลังเคลียร์รอบ
-
-    reply_text(
-        event.reply_token,
-        "✅ CLEAR ALL เสร็จสิ้น\n"
-        "ล้างสกอ / รอบทุกรอบ / Backup / ออเดอร์ ทั้งหมดแล้ว\n"
-        "พร้อมเปิดรอบใหม่ได้เลย"
-    )
-
-
-# ======================================================
-# CLEAR ALL — ล้างสกอ / รอบทุกรอบ / Backup ทั้งหมด
-# ======================================================
-def handle_clear_all(event, user_id):
-    global STATE, ROUNDS, ACTIVE_BASE_NO, POSTS, MATCHES, CLEAR_ALL_PENDING
+    global STATE, ROUNDS, ACTIVE_BASE_NO, POSTS, MATCHES, CLEAR_ALL_PENDING, SCOREBOARD_HISTORY
     now = time.time()
     if user_id not in CLEAR_ALL_PENDING or now - CLEAR_ALL_PENDING[user_id] > 60:
         CLEAR_ALL_PENDING[user_id] = now
@@ -12532,8 +13247,8 @@ def handle_clear_all(event, user_id):
             "- คืนเครดิตลูกค้าทุกบิลที่จับคู่อยู่\n"
             "- สกอและคู่ทั้งหมด\n"
             "- รอบทุกรอบ (ทุกฐาน)\n"
-            "- Backup และออเดอร์ทั้งหมด\n"
-            "(ไม่ล้างประวัติสลิป กันเติมซ้ำ)\n\n"
+            "- Backup และออเดอร์ทั้งหมด\n\n"
+            "✅ ประวัติสลิปเติมเครดิตจะ ไม่ถูกลบ (กันสลิปซ้ำ)\n\n"
             "⚠️ พิมพ์ CLEAR ALL อีกครั้งภายใน 60 วินาที เพื่อยืนยัน")
         return
     CLEAR_ALL_PENDING.pop(user_id, None)
@@ -12569,9 +13284,15 @@ def handle_clear_all(event, user_id):
             print(f"CLEAR ALL save_user_db error: {e}")
         POSTS.clear()
         MATCHES.clear()
-        for base_no in list(ROUNDS.keys()):
-            ROUNDS[base_no] = make_round_state(base_no)
+        SCOREBOARD_HISTORY.clear()   # ล้างประวัติสกอทั้งหมด (CLEAR ALL เท่านั้น ไม่ใช่ CR)
+        # ล้างทุกรอบโดยใช้ round_id เป็น key
+        for round_id in list(ROUNDS.keys()):
+            ROUNDS[round_id] = make_round_state(ROUNDS[round_id].get("base_no") or "1")
+            # ตั้งค่า backup_status: cleared เพื่อไม่ให้ restore_round_backup_db restore ข้อมูลเก่ากลับมา
+            ROUNDS[round_id]["backup_status"] = "cleared"
         ACTIVE_BASE_NO = "1"
+        # สร้างรอบเริ่มต้นใหม่สำหรับฐาน 1
+        ROUNDS["1"] = make_round_state("1")
         STATE = ROUNDS["1"]
         ORDER_STATE["next_order_no"] = ORDER_START_NO
         ORDER_STATE["last_reset"] = datetime.now().isoformat()
@@ -12586,14 +13307,18 @@ def handle_clear_all(event, user_id):
             os.makedirs(ROUND_BACKUP_DIR, exist_ok=True)
         except Exception as e:
             print(f"CLEAR ALL backup dir error: {e}")
-        # หมายเหตุ: CLEAR ALL "ไม่" ล้างประวัติสลิป (SLIP_TOPUPS) อีกต่อไป
-        # เพื่อกันการนำสลิปเก่ากลับมาเติมซ้ำหลังเคลียร์รอบ
+        # หมายเหตุ: ไม่ล้าง SLIP_TOPUPS เพื่อกันสลิปซ้ำถูกเติมซ้ำหลัง CLEAR ALL
+        
+        # หน่วงเวลา backup ป้องกันไฟล์ backup ใหม่ถูกสร้างขึ้นมาขณะส่งข้อความยืนยันเสร็จสิ้น
+        global ROUND_BACKUP_SUPPRESS_UNTIL
+        ROUND_BACKUP_SUPPRESS_UNTIL = time.time() + 60.0
+    
     reply_text(event.reply_token,
         "✅ CLEAR ALL เสร็จสิ้น\n\n"
         f"💰 คืนเครดิตลูกค้าแล้ว: {total_refunded_matches:,} บิล\n"
         f"💰 เครดิตคืนรวม: {total_refunded_credit:,} เครดิต\n\n"
         "🗑️ ล้างสกอ / รอบทุกรอบ / Backup / ออเดอร์ ทั้งหมดแล้ว\n"
-        "🧾 เก็บประวัติสลิปไว้เหมือนเดิม (กันเติมซ้ำ)\n"
+        "🔒 ประวัติสลิปเติมเครดิตยังคงอยู่ (กันสลิปซ้ำ)\n"
         "พร้อมเปิดรอบใหม่ได้เลย")
 
 
@@ -12629,9 +13354,17 @@ def handle_message(event):
         reply_problem(event, camp_scope.get("error"))
         return
 
+    # ถ้าแอดมิน copy/forward ข้อความรายการค่าย (ขึ้นต้นด้วย 🚀🔥 คุยกันเลย) → เงียบ
+    # ไม่ต้อง parse เพราะจะทำให้บอทตอบ ambiguous รบกวนลูกค้า
+    if is_admin(user_id) and filter_text.startswith("🚀🔥 คุยกันเลย"):
+        return
+
     text = filter_text
     implicit_scope = False
     if not base_scope and not camp_scope:
+        # select_base_for_incoming_text เปลี่ยน global STATE แต่ create_post/handle_confirm
+        # ต่างใช้ round_state และ ROUNDS โดยตรง ไม่พึ่ง global STATE
+        # จึงไม่ต้อง lock ที่นี่ — ป้องกัน throughput ตก ตอนคนเล่นพร้อมกันเยอะ
         select_base_for_incoming_text(event, text)
         if is_admin(user_id) and is_front_chat(event):
             implicit_scope = select_base_for_admin_implicit_command(text, get_current_chat_id(event))
@@ -12679,44 +13412,20 @@ def handle_message(event):
         reply_text(event.reply_token, add_admins_from_mentions(event, user_id))
         return
 
-    if is_remove_admin_command(text):
-        if not can_use_backoffice_command(event, user_id):
-            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะหลังบ้านหรือแอดมิน")
-            return
-
-        reply_text(event.reply_token, remove_admins_from_mentions(event, user_id))
-        return
-
-    if is_clear_admin_prompt(text):
-        if not can_use_backoffice_command(event, user_id):
-            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะหลังบ้านหรือแอดมิน")
-            return
-
-        admins_count = len(DYNAMIC_ADMINS.get("admins", {}) if isinstance(DYNAMIC_ADMINS, dict) else {})
-        reply_text(
-            event.reply_token,
-            "⚠️ ยืนยันล้างแอดมินทั้งหมด\n\n"
-            f"จะลบแอดมินที่เพิ่มผ่านแชททั้งหมด ({admins_count} คน)\n"
-            "เหลือเฉพาะแอดมินที่ตั้งไว้ใน .env เท่านั้น\n\n"
-            "หากต้องการดำเนินการ พิมพ์:\n"
-            "ล้างแอดมิน ยืนยัน",
-        )
-        return
-
-    if is_clear_admin_command(text):
-        if not can_use_backoffice_command(event, user_id):
-            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะหลังบ้านหรือแอดมิน")
-            return
-
-        reply_text(event.reply_token, clear_dynamic_admins(user_id))
-        return
-
     if is_admin_list_command(text):
         if not can_use_strict_backoffice_command(event):
             reply_text(event.reply_token, strict_backoffice_only_text("List / เช็คแอดมิน"))
             return
 
         reply_text(event.reply_token, admin_list_report())
+        return
+
+    if is_clear_admin_command(text):
+        if not can_use_strict_backoffice_command(event):
+            reply_text(event.reply_token, strict_backoffice_only_text("ล้างแอดมิน"))
+            return
+
+        reply_text(event.reply_token, clear_dynamic_admins(user_id))
         return
 
     if is_credit_check_mention_command(text):
@@ -12830,15 +13539,6 @@ def handle_message(event):
         reply_text(event.reply_token, current_round_report())
         return
 
-
-    if is_quota_command(text):
-        if not is_admin(user_id):
-            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะแอดมิน")
-            return
-        
-        reply_text(event.reply_token, quota_report())
-        return
-
     if is_match_list_command(text):
         if not can_use_backoffice_command(event, user_id):
             reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะหลังบ้านหรือแอดมิน")
@@ -12856,14 +13556,42 @@ def handle_message(event):
         return
 
     score_clean = re.sub(r"\s+", "", (text or "").strip()).lower()
-    if is_scoreboard_command(text) and not (is_private_chat(event) and score_clean == "รายการ"):
+    if text.strip().lower() == "testscore":
         if not is_admin(user_id):
             reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะแอดมิน")
             return
-
+        import random
+        _camp_names = ["แมวป่า","เดินทาง","กันเทพ","งามดี","ทองภัคดี","นกเผือก","มหาลัย",
+                       "ดีสนิท","หัวฝู","สมานฉันท์","เมืองไทย","ปลดเทวดา","จัดทอง","มึ่งเมือง",
+                       "พัทยา","บริการ","กิจนา","ดารมา","สหาย","ไม่สวย","บัง","เพรช","หลงวัด"]
+        _statuses = [("ชนะ","✅✅","#16A34A"),("แพ้","❌❌","#DC2626"),("จาว","⛔⛔","#6B7280")]
+        _rows = []
+        for i in range(120):
+            _camp = _camp_names[i % len(_camp_names)] + (f"({i//len(_camp_names)+1})" if i >= len(_camp_names) else "")
+            _mn = random.randint(260, 340)
+            _mx = _mn + random.choice([0, 10, 20, 30])
+            _result = random.randint(_mn - 20, _mx + 20)
+            _sw, _si, _sc = _statuses[i % 3]
+            _rows.append({
+                "sort": (float(i), str(i)),
+                "camp_name": _camp,
+                "price_text": f"{_mn}-{_mx}" if _mn != _mx else str(_mn),
+                "result_text": str(_result),
+                "status_word": _sw,
+                "status_icons": _si,
+                "status_color": _sc,
+            })
+        _flex = _build_scoreboard_flex_from_rows(_rows)
+        if not _flex:
+            reply_text(event.reply_token, "ไม่สามารถสร้าง test score ได้")
+            return
+        _chat_id = get_current_chat_id(event)
+        _reply_scoreboard(event.reply_token, _flex, get_current_chat_id(event))
+        return
+    if is_scoreboard_command(text) and not (is_private_chat(event) and score_clean == "รายการ"):
         flex = scoreboard_flex_for_chat(get_current_chat_id(event))
         if flex:
-            reply_flex(event.reply_token, "สกอค่าย", flex)
+            _reply_scoreboard(event.reply_token, flex, get_current_chat_id(event))
         else:
             reply_text(event.reply_token, scoreboard_empty_text(get_current_chat_id(event)))
         return
@@ -12928,15 +13656,12 @@ def handle_message(event):
         if should_skip_bank_account_by_cooldown(event):
             return
 
-        # ส่ง 2 อย่างใน reply token เดียวกัน:
-        # 1) ข้อความบัญชีแบบ TEXT
-        # 2) FLEX ปุ่มสีเขียวสำหรับกดเข้าหลังบ้าน
-        reply_text_and_flex(
-            event.reply_token,
-            bank_account_text(),
-            "กดเข้าหลังบ้าน",
-            bank_account_backoffice_flex(),
-        )
+        if is_private_chat(event):
+            # แชทส่วนตัว 1-1: ส่งข้อความ TEXT อย่างเดียว (6 บัญชี) ไม่มี FLEX
+            reply_text(event.reply_token, bank_account_6_accounts_text())
+        else:
+            # กลุ่มหน้าบ้าน: ส่งเฉพาะปุ่มสีเขียว "ขอเลขบัญชีกดที่นี่!" และไม่มี TEXT ข้างบน
+            reply_flex(event.reply_token, "ขอเลขบัญชีกดที่นี่!", bank_account_backoffice_flex())
         return
 
 
@@ -12975,6 +13700,32 @@ def handle_message(event):
         reply_flex(event.reply_token, "รายการเล่นของคุณ", active_plays_flex(user_id))
         return
 
+    # รายการเล่น — แสดงค่ายที่เปิดอยู่ตอนนี้ (ใช้ได้ในกลุ่ม)
+    if text.replace(" ", "") in {"รายการ", "รายการเล่น", "ค่ายที่เปิด", "เปิดอยู่"}:
+        _open_lines = []
+        _open_states = [
+            _st for _bn, _st in ROUNDS.items()
+            if isinstance(_st, dict) and _st.get("opened") and _st.get("round_id")
+        ]
+        # เรียงตามเวลาเปิด (เก่าไปใหม่) ค่ายล่าสุดอยู่ท้ายสุด
+        _open_states.sort(key=lambda s: s.get("opened_at_ts") or s.get("opened_at") or "")
+        for _st in _open_states:
+            _c = _st.get("camp_name") or "-"
+            _mn = _st.get("base_min")
+            _mx = _st.get("base_max")
+            if _mn is not None and _mx is not None:
+                _open_lines.append(f"{_c}\nช่าง  {format_price_range_text(_mn, _mx)}")
+            else:
+                _open_lines.append(f"{_c}\nช่าง  ⛔️")
+
+
+        if _open_lines:
+            _body = "\n\n".join(_open_lines)
+            reply_text(event.reply_token, f"🚀🔥 คุยกันเลย 🔥🚀\n\n{_body}\n\n🚀🚀🚀🚀🚀")
+        else:
+            reply_text(event.reply_token, "ยังไม่มีค่ายที่เปิดอยู่ตอนนี้")
+        return
+
     if text in ["เช็คยอด", "เครดิต", "ยอด", "เงิน"]:
         # เช็คยอดใช้ได้เฉพาะแชทส่วนตัวกับ OA; ถ้าพิมพ์ในกลุ่มบอทเงียบ
         if not is_private_chat(event):
@@ -13011,9 +13762,110 @@ def handle_message(event):
         reply_text(event.reply_token, msg)
         return
 
+    # ช่าง <ค่าย> <min-max | single3> — ยืนยัน/เปลี่ยนราคากลางหลังปิด (admin เท่านั้น)
+    _ch_m = re.match(r"^ช่าง\s+(.+?)\s+(\d+)\s*[-/]\s*(\d+)$", text.strip())
+    _ch_m_single = re.match(r"^ช่าง\s+(.+?)\s+(\d{3})$", text.strip()) if not _ch_m else None
+    if _ch_m or _ch_m_single:
+        if not is_admin(user_id):
+            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะแอดมิน")
+            return
+        if not is_front_chat(event):
+            reply_text(event.reply_token, front_room_block_text("เปลี่ยนราคา"))
+            return
+        if _ch_m:
+            _ch_camp = _ch_m.group(1).strip()
+            _ch_a, _ch_b = int(_ch_m.group(2)), int(_ch_m.group(3))
+        else:
+            _ch_camp = _ch_m_single.group(1).strip()
+            _ch_a = _ch_b = int(_ch_m_single.group(2))
+        if _ch_a > _ch_b:
+            _ch_a, _ch_b = _ch_b, _ch_a
+        with STATE_LOCK:
+            _ch_state = None
+            for _bn, _st in ROUNDS.items():
+                if not isinstance(_st, dict):
+                    continue
+                if normalize_camp_key(_st.get("camp_name")) == normalize_camp_key(_ch_camp):
+                    if _st.get("round_id") and not _st.get("settled"):
+                        _ch_state = _st
+                        break
+            if _ch_state is None:
+                reply_text(event.reply_token, f"❌ ไม่พบค่ายที่ยังค้างอยู่: {_ch_camp}")
+                return
+            _ch_state["base_min"] = _ch_a
+            _ch_state["base_max"] = _ch_b
+            _ch_state["price_mode"] = "normal"
+            _ch_state["updated_at"] = now_text()
+            save_round_backup_db(reason="price_changed")
+        reply_text(
+            event.reply_token,
+            f"✅ ยืนยันราคากลาง {_ch_camp}: {format_price_range_text(_ch_a, _ch_b)} แล้ว"
+        )
+        return
+
+    # เปลี่ยนราคากลาง: เปลี่ยนราคา ชื่อค่าย 320-340
+    _chprice_m = re.match(r"^เปลี่ยนราคา\s+(.+?)\s+(\d+)\s*[-/]\s*(\d+)$", text.strip())
+    if _chprice_m:
+        _cp_camp = _chprice_m.group(1).strip()
+        _cp_a, _cp_b = int(_chprice_m.group(2)), int(_chprice_m.group(3))
+        if _cp_a > _cp_b:
+            _cp_a, _cp_b = _cp_b, _cp_a
+        if not is_admin(user_id):
+            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะแอดมิน")
+            return
+        if not is_front_chat(event):
+            reply_text(event.reply_token, front_room_block_text("เปลี่ยนราคา"))
+            return
+        with STATE_LOCK:
+            _cp_state = None
+            for _bn, _st in ROUNDS.items():
+                if not isinstance(_st, dict):
+                    continue
+                if normalize_camp_key(_st.get("camp_name")) == normalize_camp_key(_cp_camp):
+                    if _st.get("round_id") and not _st.get("settled"):
+                        _cp_state = _st
+                        break
+            if _cp_state is None:
+                reply_text(event.reply_token, f"❌ ไม่พบค่ายที่ยังค้างอยู่: {_cp_camp}")
+                return
+            _cp_state["base_min"] = _cp_a
+            _cp_state["base_max"] = _cp_b
+            _cp_state["price_mode"] = "normal"
+            _cp_state["updated_at"] = now_text()
+            save_round_backup_db(reason="price_changed")
+        # แสดงรายการค่ายทั้งหมดที่เปิดอยู่
+        _all_open_lines = []
+        for _bn, _st in sorted(ROUNDS.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
+            if not isinstance(_st, dict):
+                continue
+            if _st.get("opened") and _st.get("round_id"):
+                _c = _st.get("camp_name") or "-"
+                _mn = _st.get("base_min")
+                _mx = _st.get("base_max")
+                if _mn is not None and _mx is not None:
+                    _all_open_lines.append(f"{_c}\nช่าง  {format_price_range_text(_mn, _mx)}")
+                else:
+                    _all_open_lines.append(f"{_c}\nช่าง  ⛔️")
+        _camp_list = "\n\n".join(_all_open_lines) if _all_open_lines else f"{_cp_camp}\nช่าง  {_cp_a}-{_cp_b}"
+        reply_text(
+            event.reply_token,
+            f"✅ เปลี่ยนราคากลาง {_cp_camp} เป็น {_cp_a}-{_cp_b} แล้ว\n\n"
+            f"🚀🔥 รายการค่ายที่เปิดอยู่ 🔥🚀\n\n"
+            f"{_camp_list}\n\n"
+            f"🚀🚀🚀🚀🚀"
+        )
+        return
+
     # เปิดรอบ
-    camp_name = parse_open_command(text)
-    if camp_name:
+    _open_cmd = parse_open_command(text)
+    if _open_cmd is not None:
+        camp_name, open_base_min, open_base_max = _open_cmd
+        if not camp_name:
+            _open_cmd = None  # ชื่อค่ายว่างไม่รับ
+
+    if _open_cmd is not None:
+        camp_name, open_base_min, open_base_max = _open_cmd
+
         if not is_admin(user_id):
             reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะแอดมิน")
             return
@@ -13033,6 +13885,23 @@ def handle_message(event):
             )
             return
 
+        # หมายเหตุ: ระบบนี้เปิดหลายค่ายพร้อมกันได้ ไม่บล็อกรอบค้าง
+        # ระบบจะเลือกฐานว่างให้อัตโนมัติ
+
+        # นับว่าชื่อค่ายนี้ถูกใช้ไปกี่ครั้งแล้ว (รวม settled) แล้วต่อ (2), (3)...
+        def _strip_camp_index(name: str) -> str:
+            """ตัด (2), (3) ท้ายออก เพื่อเปรียบเทียบชื่อฐาน"""
+            return re.sub(r"\s*\(\d+\)$", "", normalize_camp_key(name or "")).strip()
+
+        _base_name = _strip_camp_index(camp_name)
+        _name_count = sum(
+            1 for _st in ROUNDS.values()
+            if isinstance(_st, dict) and _st.get("round_id")
+            and _strip_camp_index(_st.get("camp_name", "")) == _base_name
+        )
+        if _name_count > 0:
+            camp_name = f"{camp_name} ({_name_count + 1})"
+
         with STATE_LOCK:
             # เปิดรอบใหม่อัตโนมัติในฐานว่าง ไม่ต้องให้แอดมินพิมพ์ ฐาน1/ฐาน2
             select_base_for_new_round(chat_id)
@@ -13043,9 +13912,15 @@ def handle_message(event):
             STATE["chat_id"] = get_current_chat_id(event)
             STATE["opened_at_ts"] = time.time()
             STATE["updated_at"] = now_text()
-            STATE["base_min"] = None
-            STATE["base_max"] = None
-            STATE["price_mode"] = None
+            # ถ้ามีราคากลางในคำสั่งเปิด ให้ set ทันที ไม่ต้องรอคำสั่ง ราคาช่าง แยก
+            if open_base_min is not None and open_base_max is not None:
+                STATE["base_min"] = open_base_min
+                STATE["base_max"] = open_base_max
+                STATE["price_mode"] = "normal"
+            else:
+                STATE["base_min"] = None
+                STATE["base_max"] = None
+                STATE["price_mode"] = None
             STATE["no_price_reason"] = None
             STATE["two_digit_start"] = None
             STATE["closed_at"] = None
@@ -13058,17 +13933,50 @@ def handle_message(event):
             clear_pending_price()
             clear_pending_round_clear()
 
+        # สร้างรายการค่ายทั้งหมดที่เปิดอยู่ ณ ตอนนี้ (หลัง STATE update แล้ว)
+        def _sort_base_no(item):
+            try:
+                return int(str(item[0]))
+            except Exception:
+                return 999
+
+        _all_open_lines = []
+        for _bn, _st in sorted(ROUNDS.items(), key=_sort_base_no):
+            if not isinstance(_st, dict):
+                continue
+            if _st.get("opened") and _st.get("round_id") and not _st.get("settled"):
+                _c = _st.get("camp_name") or "-"
+                _mn = _st.get("base_min")
+                _mx = _st.get("base_max")
+                if _mn is not None and _mx is not None:
+                    _all_open_lines.append(f"{_c}\nช่าง  {format_price_range_text(_mn, _mx)}")
+                else:
+                    _all_open_lines.append(f"{_c}\nช่าง  ⛔️")
+
+        if not _all_open_lines:
+            # fallback กรณี ROUNDS ยังไม่ sync (ไม่ควรเกิด)
+            if open_base_min is not None and open_base_max is not None:
+                _all_open_lines.append(f"{camp_name}\nช่าง  {open_base_min}-{open_base_max}")
+            else:
+                _all_open_lines.append(f"{camp_name}\nช่าง  ⛔️")
+
+        _camp_list = "\n\n".join(_all_open_lines)
         reply_text(
             event.reply_token,
-            f"🚀🔥 {base_label_pretty()} คุยกันเลย 🔥🚀\n\n"
-            f"ชื่อค่าย :  {camp_name}\n\n"
-            f"ช่างราคา      ⛔️\n\n"
-            f"🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀"
+            f"🚀🔥 คุยกันเลย 🔥🚀\n\n"
+            f"{_camp_list}\n\n"
+            f"🚀🚀🚀🚀🚀"
         )
         return
 
-    # ปิดรอบ
-    if text == "ปิด":
+    # ปิดรอบ — รองรับ "ปิด" (ปิดค่ายที่เปิดอยู่) และ "ปิด ชื่อค่าย" (fuzzy match)
+    _close_cmd = None
+    if text.strip() == "ปิด":
+        _close_cmd = "any"  # ปิดค่ายที่เปิดอยู่ค่ายเดียว หรือถามถ้ามีหลายค่าย
+    elif re.match(r"^ปิด\s+.+$", text.strip()):
+        _close_cmd = re.match(r"^ปิด\s+(.+)$", text.strip()).group(1).strip()
+
+    if _close_cmd is not None:
         if not is_admin(user_id):
             reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะแอดมิน")
             return
@@ -13077,31 +13985,85 @@ def handle_message(event):
             reply_text(event.reply_token, front_room_block_text("ปิดรอบ"))
             return
 
-        if STATE.get("round_id") is None:
-            reply_text(event.reply_token, "ยังไม่มีรอบให้ปิด")
+        # หาค่ายที่จะปิด
+        _open_states = [
+            (bn, st) for bn, st in ROUNDS.items()
+            if isinstance(st, dict) and st.get("opened") and st.get("round_id")
+        ]
+
+        if not _open_states:
+            reply_text(event.reply_token, "ยังไม่มีรอบที่เปิดอยู่")
             return
 
-        if not is_current_round_chat(event):
-            reply_text(event.reply_token, cross_room_block_text("ปิดรอบ"))
-            return
+        _target_st = None
+        _target_bn = None
 
-        if not STATE["opened"]:
-            reply_text(event.reply_token, "รอบนี้ปิดอยู่แล้ว")
-            return
+        if _close_cmd == "any":
+            if len(_open_states) == 1:
+                _target_bn, _target_st = _open_states[0]
+            else:
+                _camp_list = "\n".join(f"- {st.get('camp_name','-')}" for _,st in _open_states)
+                reply_text(event.reply_token, f"⚠️ มีหลายค่ายเปิดอยู่ กรุณาระบุชื่อค่ายที่ต้องการปิด\nเช่น: ปิด เมฆ\n\nค่ายที่เปิดอยู่:\n{_camp_list}")
+                return
+        else:
+            # fuzzy match ชื่อค่ายจาก substring (รองรับวรรณยุกต์/ไม้โท/สระ)
+            _keyword = _close_cmd
+            # ลบเฉพาะวรรณยุกต์ (ไม้เอก โท ตรี จัตวา ไม้ไต่คู้ ฯลฯ) ไม่ลบสระ เ แ โ ใ ไ
+            THAI_DIACRITICS_RE = re.compile(r"[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]")
+            THAI_CONSONANT_RE = re.compile(r"[\u0E01-\u0E2E\u0E30\u0E32\u0E33\u0E40-\u0E44]")
+
+            def _strip_dia(t):
+                return THAI_DIACRITICS_RE.sub("", t or "")
+
+            def _strip_index(t):
+                """ตัด (2), (3) ท้ายออก"""
+                return re.sub(r"\s*\(\d+\)\s*$", "", (t or "").strip())
+
+            def _camp_match(camp_name, keyword):
+                """จับชื่อค่ายแบบ substring ลบวรรณยุกต์และ (N) ก่อนเปรียบเทียบ"""
+                # ตัด (N) ออกจากชื่อค่ายก่อน เพื่อให้ 'โด้นำชัย' match 'โด้นำชัย (2)'
+                cs = _strip_dia(normalize_camp_key(_strip_index(camp_name)))
+                ks = _strip_dia(normalize_camp_key(_strip_index(keyword)))
+                if not ks:
+                    return False
+                return cs == ks or ks in cs
+
+            _matched_camps = [(bn, st) for bn, st in _open_states if _camp_match(st.get("camp_name") or "", _keyword)]
+
+            if len(_matched_camps) == 1:
+                _target_bn, _target_st = _matched_camps[0]
+            elif len(_matched_camps) > 1:
+                # ถ้า match หลายค่าย ลองหาอันที่ชื่อตรงสุด (หลังตัด (N))
+                _strip_kw = re.sub(r"\s*\(\d+\)\s*$", "", _keyword.strip())
+                _exact = [(bn, st) for bn, st in _matched_camps
+                          if re.sub(r"\s*\(\d+\)\s*$", "", (st.get("camp_name") or "").strip()) == _strip_kw]
+                if len(_exact) == 1:
+                    _target_bn, _target_st = _exact[0]
+                else:
+                    # ยังคลุมเครือ — แจ้งให้ระบุชัดขึ้น
+                    _clist = "\n".join(f"- {st.get('camp_name','-')}" for _,st in _matched_camps)
+                    reply_text(event.reply_token, f"⚠️ มีหลายค่ายที่ชื่อคล้ายกัน กรุณาระบุชื่อเต็มที่ต้องการปิด:\n{_clist}")
+                    return
+
+            if _target_st is None:
+                _camp_list = ", ".join(st.get("camp_name","-") for _,st in _open_states)
+                reply_text(event.reply_token, f"❌ ไม่พบค่าย \"{_keyword}\" ที่เปิดอยู่\nค่ายที่เปิดอยู่: {_camp_list}")
+                return
 
         with STATE_LOCK:
-            STATE["opened"] = False
-            STATE["closed_at"] = now_text()
-            STATE["updated_at"] = now_text()
-            camp = STATE["camp_name"] or "-"
+            _target_st["opened"] = False
+            _target_st["closed_at"] = now_text()
+            _target_st["updated_at"] = now_text()
+            _closed_camp = _target_st.get("camp_name") or "-"
+            save_round_backup_db(reason="round_closed")
 
         reply_text(
             event.reply_token,
-            f"❌❌ ปิด {base_label_pretty()} แล้ว ❌❌\n\n"
+            f"❌❌ ปิด {_closed_camp} แล้ว ❌❌\n\n"
             f"3  2  1 ไป๊!! 🚀🚀🚀\n\n"
-            f"⛔ หลังปิดไม่ติดทุกกรณี ⛔ \n"
-            f"ถ้าต้องการเปิดให้เล่นต่อ ให้แอดมินพิมพ์: เล่นต่อ {camp}\n"
-            f"🔘 {camp}"
+            f"⛔ หลังปิดไม่ติดทุกกรณี ⛔\n"
+            f"ถ้าต้องการเปิดให้เล่นต่อ ให้แอดมินพิมพ์: เล่นต่อ {_closed_camp}\n"
+            f"🔘 {_closed_camp}"
         )
         return
 
@@ -13296,7 +14258,17 @@ def handle_message(event):
 
         msg = handle_special_result_with_double_confirm(special_result)
         if is_result_flex_reply_payload(msg):
-            reply_flex(event.reply_token, msg.get("alt_text"), msg.get("flex"))
+            _score_flex = scoreboard_flex_for_chat(get_current_chat_id(event))
+            if _score_flex:
+                if isinstance(_score_flex, list):
+                    reply_two_flex(event.reply_token, msg.get("alt_text"), msg.get("flex"), "📋 ผลบั้งไฟ", _score_flex[0])
+                    _cid = get_current_chat_id(event)
+                    for _si, _sf in enumerate(_score_flex[1:], start=2):
+                        push_flex_async(_cid, f"📋 ผลบั้งไฟ ({_si}/{len(_score_flex)})", _sf)
+                else:
+                    reply_two_flex(event.reply_token, msg.get("alt_text"), msg.get("flex"), "📋 ผลบั้งไฟ", _score_flex)
+            else:
+                reply_flex(event.reply_token, msg.get("alt_text"), msg.get("flex"))
         else:
             reply_text(event.reply_token, msg)
         return
@@ -13318,7 +14290,17 @@ def handle_message(event):
 
         msg = handle_result_with_double_confirm(result_value)
         if is_result_flex_reply_payload(msg):
-            reply_flex(event.reply_token, msg.get("alt_text"), msg.get("flex"))
+            _score_flex = scoreboard_flex_for_chat(get_current_chat_id(event))
+            if _score_flex:
+                if isinstance(_score_flex, list):
+                    reply_two_flex(event.reply_token, msg.get("alt_text"), msg.get("flex"), "📋 ผลบั้งไฟ", _score_flex[0])
+                    _cid = get_current_chat_id(event)
+                    for _si, _sf in enumerate(_score_flex[1:], start=2):
+                        push_flex_async(_cid, f"📋 ผลบั้งไฟ ({_si}/{len(_score_flex)})", _sf)
+                else:
+                    reply_two_flex(event.reply_token, msg.get("alt_text"), msg.get("flex"), "📋 ผลบั้งไฟ", _score_flex)
+            else:
+                reply_flex(event.reply_token, msg.get("alt_text"), msg.get("flex"))
         else:
             reply_text(event.reply_token, msg)
         return
@@ -13350,6 +14332,128 @@ def handle_message(event):
         return
 
     # ======================================================
+    # ยกเลิก ชื่อค่าย — แอดมินยกเลิกทั้งค่าย คืนเครดิตลูกค้าทุกคน
+    # ======================================================
+    _cancel_camp_m = re.match(r"^ยกเลิก\s+(.+)$", text.strip())
+    if _cancel_camp_m:
+        _cancel_camp_name = _cancel_camp_m.group(1).strip()
+        if _cancel_camp_name and not _cancel_camp_name.startswith("ย้อน"):
+            if not is_admin(user_id):
+                reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะแอดมิน")
+                return
+            with STATE_LOCK:
+                # fuzzy match + ตัด (N) ออก เหมือนคำสั่ง ปิด
+                _THAI_DIACRITICS_RE2 = re.compile(r"[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]")
+                def _sd(t): return _THAI_DIACRITICS_RE2.sub("", t or "")
+                def _si(t): return re.sub(r"\s*\(\d+\)\s*$", "", (t or "").strip())
+                def _cm(camp, kw):
+                    cs = _sd(normalize_camp_key(_si(camp)))
+                    ks = _sd(normalize_camp_key(_si(kw)))
+                    return bool(ks) and (cs == ks or ks in cs)
+
+                # หาค่ายที่ match (ยังไม่ settled)
+                _matched = [(bn, st) for bn, st in ROUNDS.items()
+                            if isinstance(st, dict) and st.get("round_id") and not st.get("settled")
+                            and _cm(st.get("camp_name") or "", _cancel_camp_name)]
+
+                if not _matched:
+                    reply_text(event.reply_token, f"❌ ไม่พบค่ายที่ยังค้างอยู่: {_cancel_camp_name}")
+                    return
+
+                if len(_matched) > 1:
+                    # ถ้า match หลายค่าย ลองหาอันที่ชื่อตรงสุด
+                    _kw_stripped = _si(_cancel_camp_name)
+                    _exact = [(bn, st) for bn, st in _matched
+                              if _si(st.get("camp_name") or "") == _kw_stripped]
+                    if len(_exact) == 1:
+                        _matched = _exact
+                    else:
+                        _clist = "\n".join(f"- {st.get('camp_name','-')}" for _,st in _matched)
+                        reply_text(event.reply_token, f"⚠️ มีหลายค่ายที่ชื่อคล้ายกัน กรุณาระบุชื่อเต็ม:\n{_clist}")
+                        return
+
+                _cancel_base, _cancel_state = _matched[0]
+
+                # คืนเครดิตบิลที่ matched ทั้งหมดของค่ายนี้
+                _round_id = _cancel_state.get("round_id")
+                _refund_count = 0
+                _refund_total = 0
+                for _match in list(MATCHES.values()):
+                    if _match.get("round_id") != _round_id:
+                        continue
+                    if _match.get("status") not in ("matched",):
+                        continue
+                    _amt = _match.get("amount", 0)
+                    _maker = USERS.get(_match.get("maker_id"))
+                    _taker = USERS.get(_match.get("taker_id"))
+                    if _maker:
+                        _maker["credit"] = user_credit_amount(_maker) + _amt
+                    if _taker:
+                        _taker["credit"] = user_credit_amount(_taker) + _amt
+                    _match["status"] = "refunded"
+                    _match["refunded_at"] = now_text()
+                    _refund_count += 1
+                    _refund_total += _amt * 2
+                # ยกเลิก posts ที่ยังเปิดอยู่
+                for _post in list(POSTS.values()):
+                    if _post.get("round_id") == _round_id:
+                        _post["status"] = "cancelled"
+                # mark settled
+                _real_camp_name = _cancel_state.get("camp_name") or _cancel_camp_name
+                _cancel_state["settled"] = True
+                _cancel_state["opened"] = False
+                _cancel_state["result"] = "cancelled"
+                _cancel_state["updated_at"] = now_text()
+                save_user_db()
+                save_round_backup_db(reason="camp_cancelled")
+            # Push FLEX แจ้งยกเลิก+คืนเครดิต ไปยัง DM ของแต่ละคนในบิล
+            # capture ค่าตอนนี้เลย กัน late-binding closure bug
+            _notify_round_id = str(_round_id)
+            _notify_camp_name = str(_real_camp_name)
+
+            def _push_cancel_notifications(round_id=_notify_round_id, camp_name=_notify_camp_name):
+                # รวม match ทั้งหมดของแต่ละ user ก่อน แล้วส่ง Flex เดียว
+                from collections import defaultdict
+                user_matches = defaultdict(list)  # uid -> [(match, refund_amt)]
+
+                for _match in list(MATCHES.values()):
+                    if _match.get("round_id") != round_id:
+                        continue
+                    if _match.get("status") != "refunded":
+                        continue
+                    _amt = int(_match.get("amount", 0) or 0)
+                    for _uid in [_match.get("maker_id"), _match.get("taker_id")]:
+                        if _uid:
+                            user_matches[_uid].append((_match, _amt))
+
+                for _uid, _items in user_matches.items():
+                    try:
+                        if len(_items) == 1:
+                            # รายการเดียว — ส่ง bubble เดิม
+                            _flex = camp_cancel_notify_flex(_items[0][0], camp_name, _items[0][1])
+                            push_flex(_uid, f"ยกเลิกค่าย {camp_name}", _flex)
+                        else:
+                            # หลายรายการ — รวมเป็น bubble เดียวต่อลงมา
+                            _total_refund = sum(amt for _, amt in _items)
+                            _flex = camp_cancel_multi_flex(_items, camp_name)
+                            push_flex(_uid, f"ยกเลิกค่าย {camp_name} ({len(_items)} รายการ คืนรวม {_total_refund:,})", _flex)
+                    except Exception as _e:
+                        try:
+                            _total = sum(amt for _, amt in _items)
+                            push_text(_uid, f"❌ ยกเลิกค่าย {camp_name} แล้ว คืนเครดิตรวม {_total:,} บาท ({len(_items)} รายการ)")
+                        except Exception:
+                            pass
+            EXECUTOR.submit(_push_cancel_notifications)
+
+            reply_text(
+                event.reply_token,
+                f"✅ ยกเลิกค่าย {_real_camp_name} แล้ว\n\n"
+                f"คืนเครดิต {_refund_count} คู่ รวม {_refund_total:,} เครดิต\n"
+                f"แจ้งลูกค้าทุกคนทาง DM เรียบร้อยแล้ว"
+            )
+            return
+
+    # ======================================================
     # CLEAR ALL — ล้างสกอ / รอบ / Backup ทั้งหมด
     # ======================================================
     if text.strip().upper() == "CLEAR ALL":
@@ -13359,27 +14463,106 @@ def handle_message(event):
         handle_clear_all(event, user_id)
         return
 
-    # CLEAR ALL
-    if text.strip().upper() == "CLEAR ALL":
-        if not is_admin(user_id):
-            reply_text(event.reply_token, "คำสั่งนี้ใช้ได้เฉพาะแอดมิน")
-            return
-        handle_clear_all(event, user_id)
-        return
-
-    # ลูกค้าโพสต์ เช่น ชล500 / ชถ500
-    offer = parse_offer(text)
-    if offer:
-        msg = create_post(event, offer)
-        if msg:
-            reply_problem(event, msg)
-        return
-
     # ตอบติด / ยืนยัน เช่น ต, ติด, ต300, ติด300, 300ต, 300ติด
+    # ต้องตรวจก่อน find_camp_in_text เพราะ "ต" อาจ match ชื่อค่ายแล้วทำให้ ambiguous ผิดพลาด
     confirm_cmd = parse_confirm_command(text)
     if confirm_cmd:
         quoted_message_id = get_reply_message_id(event)
         msg = handle_confirm(event, quoted_message_id, confirm_cmd.get("amount"))
+        if msg:
+            reply_problem(event, msg)
+        return
+
+    # ลูกค้าโพสต์ เช่น ชล500 / ชถ500
+    # รองรับชื่อค่ายนำหน้าหรือตามหลัง เช่น "เจ ล 500" / "น้องเจ ล 500" / "ชล เจ 500"
+    _matched_camp, _play_text, _matched_base_no = find_camp_in_text(text)
+    _offer_text = _play_text if _matched_camp else text
+
+    # กรณี ambiguous — keyword match หลายค่าย (find_camp_in_text เจอ remaining parse ได้)
+    if _matched_camp == "__ambiguous__":
+        _amb_camps = _play_text
+        _amb_keyword = _matched_base_no
+        reply_problem(event, f"⚠️ คำว่า \"{_amb_keyword}\" ตรงกับหลายค่าย:\n{_amb_camps}\n\nกรุณาพิมชื่อให้ชัดขึ้น เช่น โด้นำ หรือ นุนำ")
+        return
+
+    offer = parse_offer(_offer_text)
+
+    # ถ้ายังไม่เจอ offer ให้ตรวจ ambiguous จากชื่อค่ายล้วนๆ ก่อน
+    # กรณี เช่น "ขัย กอย 500" — ขัย match หลายค่าย แต่ กอย ไม่ใช่ alias
+    if offer is None and _matched_camp is None:
+        _kw_result = find_camp_keyword_only(text)
+        if _kw_result and len(_kw_result) == 3 and _kw_result[0] == "__ambiguous__":
+            _, _amb_camps, _amb_keyword = _kw_result
+            reply_problem(event, f"⚠️ คำว่า \"{_amb_keyword}\" ตรงกับหลายค่าย:\n{_amb_camps}\n\nกรุณาพิมชื่อให้ชัดขึ้น เช่น โด้นำ หรือ นุนำ")
+            return
+
+    # ถ้าจับชื่อค่ายได้แต่ parse ไม่ผ่าน ให้ลอง parse text เดิมทั้งหมดอีกรอบ
+    # (กันเคส find_camp_in_text จับผิดทำให้ play text เสีย)
+    if offer is None and _matched_camp:
+        offer = parse_offer(text)
+        if offer:
+            _matched_camp = None
+            _matched_base_no = None
+
+    if offer:
+        # หา round_state ของค่ายที่ match — ใช้ base_no โดยตรงเพื่อความแม่นยำ
+        _post_round_state = None
+        if _matched_camp:
+            _post_round_state = select_round_state_for_camp(_matched_camp, base_no=_matched_base_no)
+            # ถ้าจับชื่อค่ายได้แต่ค้น state ไม่เจอ ให้แจ้งลูกค้า
+            if _post_round_state is None:
+                _open_camp_names = ", ".join(
+                    st.get("camp_name", "-") for st in ROUNDS.values()
+                    if isinstance(st, dict) and st.get("opened") and st.get("round_id")
+                )
+                reply_problem(event, f"⚠️ ไม่พบค่าย \"{_matched_camp}\" ที่เปิดอยู่\nค่ายที่เปิดอยู่: {_open_camp_names}")
+                return
+        else:
+            # ไม่ระบุชื่อค่าย: ถ้ามีค่ายเปิดอยู่แค่ค่ายเดียวให้ใช้ค่ายนั้น
+            _open_states = [
+                st for st in ROUNDS.values()
+                if isinstance(st, dict) and st.get("opened") and st.get("round_id")
+            ]
+            if len(_open_states) == 1:
+                _post_round_state = _open_states[0]
+            elif len(_open_states) > 1:
+                # ถ้าเป็นการเล่นตัวเลขแบบระบุช่วงราคาเอง (custom_price) เช่น 280-290ล500
+                # ให้เลือกค่ายที่ราคาช่างใกล้เคียงกับช่วงราคาที่ลูกค้าเล่นมากที่สุด
+                # โดยไม่บังคับให้ระบุชื่อค่าย
+                _is_custom_price_play = offer.get("is_custom_price") and not offer.get("is_two_digit_price")
+                if _is_custom_price_play:
+                    _play_min = offer.get("custom_price_min")
+                    _play_max = offer.get("custom_price_max")
+                    # หาค่ายที่ราคาช่างใกล้เคียงที่สุด
+                    _best_state = None
+                    _best_score = None
+                    _states_with_price = [st for st in _open_states if st.get("base_min") is not None and st.get("base_max") is not None]
+                    if _states_with_price and _play_min is not None and _play_max is not None:
+                        for _st in _states_with_price:
+                            _bmin = int(_st["base_min"])
+                            _bmax = int(_st["base_max"])
+                            # คำนวณระยะห่างระหว่างช่วงราคาเล่นกับราคาช่างของค่ายนี้
+                            if _play_max < _bmin:
+                                _gap = _bmin - _play_max
+                            elif _play_min > _bmax:
+                                _gap = _play_min - _bmax
+                            else:
+                                _gap = 0  # ช่วงทับกัน
+                            _bcenter = (_bmin + _bmax) / 2
+                            _pcenter = (_play_min + _play_max) / 2
+                            _center_gap = abs(_pcenter - _bcenter)
+                            _score = (_gap, _center_gap)
+                            if _best_score is None or _score < _best_score:
+                                _best_score = _score
+                                _best_state = _st
+                    # ถ้าค่ายที่เจอมีราคาช่างหลายค่ายและใกล้เคียงกันเท่ากัน ให้ใช้ค่ายแรกที่ดีสุด
+                    # ถ้าไม่มีค่ายไหนมีราคาช่างเลย ให้ fallback เป็นค่ายแรกที่เปิดอยู่
+                    _post_round_state = _best_state or _open_states[0]
+                else:
+                    _camp_names = ", ".join(st.get("camp_name", "-") for st in _open_states)
+                    reply_problem(event, f"⚠️ มีหลายค่ายเปิดอยู่ กรุณาระบุชื่อค่ายก่อนเล่น\nเช่น: เจริญ ล 500\n\nค่ายที่เปิดอยู่: {_camp_names}")
+                    return
+        msg = create_post(event, offer, round_state=_post_round_state)
         if msg:
             reply_problem(event, msg)
         return
@@ -13495,11 +14678,17 @@ def handle_postback(event):
         return
 
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
+# เรียกกู้คืนทันทีตอนโหลดไฟล์ ก่อน webhook เริ่มรับงาน
+restore_round_backup_db()
+
+# คืนบิลค้างอัตโนมัติตอนเริ่มบอท
+refund_all_pending_matches()
 
 threading.Thread(
     target=cleanup_processed_messages,
     daemon=True
 ).start()
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
