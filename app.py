@@ -107,7 +107,7 @@ EASYSLIP_API_RETRY_DELAY_SECONDS = float(os.getenv("EASYSLIP_API_RETRY_DELAY_SEC
 EASYSLIP_DEBUG_MODE = os.getenv("EASYSLIP_DEBUG_MODE", "1") == "1"
 
 # รายชื่อบัญชีที่อนุญาตให้เติมออโต้ (format: account_no|name_th|name_en|bank;...)
-AUTO_TOPUP_ACCOUNTS_STR = os.getenv("AUTO_TOPUP_ACCOUNTS", "0748441328|กิตติเชษฐ์ บุญอินทร์|kittichet boonin|กสิกรไทย").strip()
+AUTO_TOPUP_ACCOUNTS_STR = os.getenv("AUTO_TOPUP_ACCOUNTS", "2062416164|ธนาวุฒิ แสวงศรี|Thanawut Sawaengsri|เกียรตินาคิน").strip()
 AUTO_TOPUP_ACCOUNTS_LIST = []
 if AUTO_TOPUP_ACCOUNTS_STR:
     for acc_str in AUTO_TOPUP_ACCOUNTS_STR.split(";"):
@@ -2637,10 +2637,10 @@ def money_text(value):
 # Bank account command
 # ======================================================
 
-BANK_ACCOUNT_NUMBER = "0748441328"
-BANK_ACCOUNT_DISPLAY_NUMBER = "074-844-1328"
-BANK_ACCOUNT_BANK = "กสิกรไทย"
-BANK_ACCOUNT_NAME = "กิตติเชษฐ์ บุญอินทร์"
+BANK_ACCOUNT_NUMBER = "2062416164"
+BANK_ACCOUNT_DISPLAY_NUMBER = "2062416164"
+BANK_ACCOUNT_BANK = "เกียรตินาคิน"
+BANK_ACCOUNT_NAME = "ธนาวุฒิ แสวงศรี"
 # ใช้บัญชีเดียวสำหรับเติมเครดิตอัตโนมัติเท่านั้น
 # โค้ดจะใช้บัญชีนี้ตรวจ checkReceiver กับ Slip2Go และจะไม่รับบัญชีอื่น แม้ .env ยังมีบัญชีเก่าอยู่
 SINGLE_AUTO_TOPUP_RECEIVER = {
@@ -2654,7 +2654,7 @@ SINGLE_AUTO_TOPUP_RECEIVER = {
 # ปรับใน .env ได้ เช่น BANK_ACCOUNT_COOLDOWN_SECONDS=10
 BANK_ACCOUNT_COOLDOWN_SECONDS = int(os.getenv("BANK_ACCOUNT_COOLDOWN_SECONDS", "10"))
 BANK_ACCOUNT_COOLDOWN_CACHE = {}
-BANK_BACKOFFICE_URL = os.getenv("BANK_BACKOFFICE_URL", "https://page.line.me/812anmhp").strip() or "https://page.line.me/812anmhp"
+BANK_BACKOFFICE_URL = os.getenv("BANK_BACKOFFICE_URL", "https://page.line.me/942ngdge").strip() or "https://page.line.me/942ngdge"
 
 
 def is_bank_account_request(text: str) -> bool:
@@ -2686,12 +2686,12 @@ def is_bank_account_request(text: str) -> bool:
 
 def bank_account_text() -> str:
     return (
-        "📌 บั้งไฟน้อย เถ้าแก่น้อย💵\n"
+        "📌💎บั้งไฟอีสาน OG💯💵\n"
         "━━━━━━━━━━━━━━\n\n"
         "🏦 แจ้งเลขบัญชีฝากเงิน\n\n"
-        "🔢 เลขบัญชี : 0748441328\n"
-        "🏛 ธนาคาร : กสิกรไทย\n"
-        "👤 ชื่อบัญชี : กิตติเชษฐ์ บุญอินทร์\n\n"
+        "🔢 เลขบัญชี : 20624161648\n"
+        "🏛 ธนาคาร : เกียรตินาคิน\n"
+        "👤 ชื่อบัญชี : ธนาวุฒิ แสวงศรี\n\n"
         "━━━━━━━━━━━━━━\n"
         "⚠️ เพื่อป้องกันมิจฉาชีพ\n"
         "ชื่อผู้ฝาก-ถอน ต้องเป็นชื่อเดียวกันเท่านั้น ✅"
@@ -2727,13 +2727,13 @@ def bank_account_backoffice_flex():
 def bank_account_6_accounts_text() -> str:
     """ข้อความบัญชีรับฝาก สำหรับแชทส่วนตัว 1-1"""
     return (
-        "📌บั้งไฟน้อย เถ้าแก่น้อย 💵\n"
+        "📌💎บั้งไฟอีสาน OG💯💵\n"
         "━━━━━━━━━━━━━━\n\n"
         "🏦 บัญชีรับฝากเงิน\n\n"
         "─── บัญชีที่  ───\n"
-        "🟢 ธนาคาร  : กสิกรไทย\n"
-        "🔢 เลขบัญชี : 0748441328\n"
-        "👤 ชื่อบัญชี : กิตติเชษฐ์ บุญอินทร์\n\n"
+        "🟣 ธนาคาร  : KKP เกียรตินาคิน\n"
+        "🔢 เลขบัญชี : 2062416164\n"
+        "👤 ชื่อบัญชี : ธนาวุฒิ แสวงศรี\n\n"
         "━━━━━━━━━━━━━━\n"
         "⚠️ เพื่อป้องกันมิจฉาชีพ\n"
         "ชื่อผู้ฝาก-ถอน ต้องเป็นชื่อเดียวกันเท่านั้น ✅"
@@ -3032,7 +3032,7 @@ def is_rules_request(text: str) -> bool:
     return clean in {"กต", "กติกา"}
 
 
-RULES_IMAGE_URL = "https://i.postimg.cc/6QMWjT2d/c786e7f3-a5cc-4ab3-ba63-78c1d8341fa9.png"
+RULES_IMAGE_URL = "https://img2.pic.in.th/b6b4bb4c-aaef-4391-b1e7-กกกกกก.png"
 
 
 def rules_flex() -> dict:
