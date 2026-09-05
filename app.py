@@ -2654,7 +2654,7 @@ SINGLE_AUTO_TOPUP_RECEIVER = {
 # ปรับใน .env ได้ เช่น BANK_ACCOUNT_COOLDOWN_SECONDS=10
 BANK_ACCOUNT_COOLDOWN_SECONDS = int(os.getenv("BANK_ACCOUNT_COOLDOWN_SECONDS", "10"))
 BANK_ACCOUNT_COOLDOWN_CACHE = {}
-BANK_BACKOFFICE_URL = os.getenv("BANK_BACKOFFICE_URL", "https://page.line.me/942ngdge").strip() or "https://page.line.me/942ngdge"
+BANK_BACKOFFICE_URL = os.getenv("BANK_BACKOFFICE_URL", "https://page.line.me/812anmhp").strip() or "https://page.line.me/812anmhp"
 
 
 def is_bank_account_request(text: str) -> bool:
@@ -3032,7 +3032,7 @@ def is_rules_request(text: str) -> bool:
     return clean in {"กต", "กติกา"}
 
 
-RULES_IMAGE_URL = "https://img2.pic.in.th/b6b4bb4c-aaef-4391-b1e7-กกกกกก.png"
+RULES_IMAGE_URL = "https://i.postimg.cc/Hkf1v5Bk/da924fc3-24cc-4215-b529-a06de86fbe62.png"
 
 
 def rules_flex() -> dict:
